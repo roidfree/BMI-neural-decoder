@@ -1,0 +1,64 @@
+function [modelParameters] = positionEstimatorTraining(training_data)
+
+trials = size(training_data,1);
+movements = size(training_data,2);
+
+kernel_width = 10;
+window_width = kernel_width * 3;
+
+history_bins = 15;   % 300 ms / 20 ms
+
+for m = 1:movements
+    
+    X = [];
+    Y = [];
+    
+    for t = 1:trials
+        
+        spikes = training_data(t,m).spikes;
+        
+        % Causal Gaussian firing rate
+        rates = rates_from_spikes(spikes, kernel_width, window_width, 1);
+        
+        % Velocity
+        pos = training_data(t,m).handPos(1:2,:);
+        vel = diff(pos,1,2);
+        vel = [vel(:,1), vel];   % keep same length
+        
+        T = size(rates,2);
+        
+        % Start at 320 ms
+        for tt = 320:20:T
+            
+            if tt > history_bins
+                
+                history_vector = [];
+                
+                % Build 300 ms neural history
+                for h = 0:history_bins-1
+                    history_vector = [history_vector rates(:,tt-h)'];
+                end
+                
+                X = [X; history_vector];
+                Y = [Y; vel(:,tt)'];
+                
+            end
+        end
+        
+    end
+    
+    % Add bias column
+    X = [X ones(size(X,1),1)];
+    
+    % OLS
+    B = (X' * X) \ (X' * Y);
+    
+    modelParameters.B{m} = B;
+    
+end
+
+modelParameters.kernel_width = kernel_width;
+modelParameters.window_width = window_width;
+modelParameters.history_bins = history_bins;
+
+end
