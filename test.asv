@@ -1,0 +1,113 @@
+clear all; close all; clc;
+
+load('monkeydata_training.mat');
+
+
+K = 5;    % folds
+rng(42);  % rng 
+
+
+num_trials     = size(trial, 1);   % 100
+num_directions = size(trial, 2);   % 8
+
+fprintf('K-FOLD CROSS-VALIDATION\n');
+fprintf('K = %d,  Trials = %d,  Directions = %d\n', K, num_trials, num_directions);
+
+shuffled_indices = randperm(num_trials);
+
+% Split the 100 shuffled indices into K equal chunks
+fold_size = floor(num_trials / K);  % e.g. K=5 → 20 trials per fold
+
+% Pre-allocate results
+fold_RMSE = zeros(1, K);
+
+%% 3. K-FOLD LOOP
+for fold = 1:K
+
+    fprintf('--- Fold %d / %d ---\n', fold, K);
+
+    % ---------------------------------------------------------------------
+    % SPLIT: which trial indices are test vs train for this fold
+    % ---------------------------------------------------------------------
+    test_start = (fold - 1) * fold_size + 1;
+    test_end   = fold * fold_size;
+
+    test_idx  = shuffled_indices(test_start : test_end);           % e.g. 20 trials
+    train_idx = shuffled_indices([1:test_start-1, test_end+1:end]); % remaining 80
+
+    % Slice the trial struct — keep ALL 8 directions for both sets
+    trainData = trial(train_idx, :);
+    testData  = trial(test_idx,  :);
+
+    % ---------------------------------------------------------------------
+    % TRAIN the model on this fold's training data
+    % ---------------------------------------------------------------------
+    modelParameters = positionEstimatorTraining(trainData);
+
+    % ---------------------------------------------------------------------
+    % TEST: loop over test trials and directions, feed spikes in chunks
+    % (mirrors the official testFunction_for_students_MTb.m exactly)
+    % ---------------------------------------------------------------------
+    meanSqError  = 0;
+    n_predictions = 0;
+
+    for tr = 1:size(testData, 1)
+        for direc = 1:num_directions
+
+            decodedHandPos = [];
+
+            % Time steps: start at 320ms, step by 20ms, to end of trial
+            times = 320 : 20 : size(testData(tr, direc).spikes, 2);
+
+            for t = times
+
+                % Build the input struct positionEstimator expects
+                past_current_trial.trialId       = testData(tr, direc).trialId;
+                past_current_trial.spikes        = testData(tr, direc).spikes(:, 1:t);
+                past_current_trial.decodedHandPos = decodedHandPos;
+                past_current_trial.startHandPos  = testData(tr, direc).handPos(1:2, 1);
+
+                % Call estimator — get predicted (x, y) at this timestep
+                [decodedPosX, decodedPosY] = positionEstimator(past_current_trial, modelParameters);
+
+                decodedPos     = [decodedPosX; decodedPosY];
+                decodedHandPos = [decodedHandPos, decodedPos];
+
+                % Squared error between predicted and actual position
+                actualPos    = testData(tr, direc).handPos(1:2, t);
+                meanSqError  = meanSqError + norm(actualPos - decodedPos)^2;
+
+            end % time loop
+
+            n_predictions = n_predictions + length(times);
+
+        end % direction loop
+    end % trial loop
+
+    % RMSE for this fold
+    fold_RMSE(fold) = sqrt(meanSqError / n_predictions);
+    fprintf('  Fold %d RMSE: %.4f mm\n\n', fold, fold_RMSE(fold));
+
+end % fold loop
+
+%% 4. RESULTS
+fprintf('=========================================\n');
+fprintf('RESULTS ACROSS ALL FOLDS\n');
+fprintf('=========================================\n');
+for fold = 1:K
+    fprintf('  Fold %d RMSE: %.4f mm\n', fold, fold_RMSE(fold));
+end
+fprintf('-----------------------------------------\n');
+fprintf('  Mean RMSE:   %.4f mm\n', mean(fold_RMSE));
+fprintf('  Std  RMSE:   %.4f mm\n', std(fold_RMSE));
+fprintf('=========================================\n');
+
+%% 5. OPTIONAL PLOT — RMSE per fold
+figure;
+bar(fold_RMSE);
+hold on;
+yline(mean(fold_RMSE), 'r--', 'LineWidth', 2, 'Label', 'Mean RMSE');
+xlabel('Fold');
+ylabel('RMSE (mm)');
+title(sprintf('K-Fold Cross-Validation RMSE  (K = %d)', K));
+grid on;
