@@ -1,49 +1,168 @@
 function [modelParameters] = positionEstimatorTrainingTesting(training_data)
-    trial_rates = struct;
+    modelParameters = struct;
+    processed_data = training_data;
     trials = size(training_data, 1);
     movements = size(training_data, 2);
     neurons = 98;
-    kernel_width = 10;
-    window_width = kernel_width * 3;
-
-    % Get rates via kernel smoothing
+    
+    % Initialise bin_width field
     for t = 1:trials
         for m = 1:movements
-            trial_rates(t, m).rates = rates_from_spikes(training_data(t, m).spikes, kernel_width, window_width, 1);
-            trial_rates(t, m).handPos = training_data(t, m).handPos;
-            trial_rates(t, m).bin_width = 1;
+            processed_data(t, m).bin_width = 1;
         end
     end
+    
+    % Do spike counts in 20ms bins as a spike rate estimate
+    processed_data = rebin_data(processed_data, trials, movements, neurons, 20);
 
-    % Downsample rates if desired
-    downsampled_trial_rates = downsample_rates(trial_rates, 1, trials, movements);
+    % Apply Anscombe transform for ~constant variance and Gaussinity
+    processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
 
-end
-
-
-function [rate_trains] = rates_from_spikes(spike_trains, kernel_width, window_width, causal)
-    % Computes the estimated firing rate of all single_units using (casual) Gaussian filtering
-    % 'causal' = 0 for acausal and 'causal' = 1 for causal
-    n_s = -window_width:window_width;
-    gauss_kernel = exp(-(n_s).^2 / (2 * kernel_width.^2)) ./ (kernel_width * sqrt(2 * pi));
-    if causal == 1
-        gauss_kernel(n_s > 0) = 0;  % making it causal
-    end
-    rate_trains = conv2(spike_trains, gauss_kernel, "same");
-end
-
-
-function [downsampled_trial_rates] = downsample_rates(trial_rates, bin_width, trials, movements)
-    % Takes trial_rates struct and gives new trial_rates struct with
-    % downsampled rates and updated bin_width
-    downsampled_trial_rates = struct;
+    % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
+    % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
+    history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
+    bin_width = processed_data(1, 1).bin_width;
+    max_iter = floor(571 / bin_width) - history_bins;
+    X = zeros(trials * movements * max_iter, neurons * (history_bins + 1));
+    Y = zeros(trials * movements * max_iter, 2); % X avg velocity in col 1 and Y in 2
+    counter = 1;
     for t = 1:trials
         for m = 1:movements
-            rate_train = trial_rates(t, m).rates;
-            downsampled_rate_train = rate_train(:, 1:bin_width:end);
-            downsampled_trial_rates(t, m).rates = downsampled_rate_train;
-            downsampled_trial_rates(t, m).bin_width = bin_width;
-            downsampled_trial_rates(t, m).handPos = trial_rates(t, m).handPos;
+            for i = 1:max_iter
+                X(counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+                Y(counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+                Y(counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+                counter = counter + 1;
+            end
+        end
+    end
+    
+    % Have a bias input just in case
+    X = [X, ones(trials * movements * max_iter, 1)];
+
+    % OLS
+    B = X \ Y;
+
+    % Pass out for testing
+    modelParameters.B = B;
+end
+
+
+function [training_data] = rebin_data(training_data, trials, movements, neurons, new_bin_width)
+    % Take .spikes and rebin by counts
+    % i.e. [1 1 1 1 1] -> [5] if bin_width 1 -> 5
+    for t = 1:trials
+        for m = 1:movements
+            unbinned_target = training_data(t, m);
+            unbinned_data = unbinned_target.spikes;
+            unbinned_length = size(unbinned_data, 2);
+            binned_data = zeros(neurons, floor(unbinned_length / new_bin_width));  % drop last bin of wrong size as will confuse training
+            counter = 1;
+            for i = 1:new_bin_width:unbinned_length - (new_bin_width - 1)
+                binned_data(:, counter) = sum(unbinned_data(:, i:i + (new_bin_width - 1)), 2);
+                counter = counter + 1;
+            end
+            training_data(t, m).spikes = binned_data;
+            training_data(t, m).bin_width = training_data(t, m).bin_width * new_bin_width;
+        end
+    end
+end
+
+
+function [training_data] = downsample_data(training_data, trials, movements, neurons, downsample_step)
+    % Take .spikes and "rebin" by value at start of bin
+    % i.e. [1 2 3 4 5] -> [1] if downsample_step == 5
+    for t = 1:trials
+        for m = 1:movements
+            training_data(t, m).spikes = training_data(t, m).spikes(:, 1:downsample_step:end);
+            training_data(t, m).bin_width = training_data(t, m).bin_width * downsample_step;
+        end
+    end
+end
+
+
+function [training_data] = maxpool_data(training_data, trials, movements, neurons, maxpool_bin_width)
+    % Take .spikes and rebin by max value in bin (inspired by CNNs)
+    % i.e. [1 2 3 2 1] -> [3] if maxpool_bin_width == 5
+    for t = 1:trials
+        for m = 1:movements
+            unbinned_target = training_data(t, m);
+            unbinned_data = unbinned_target.spikes;
+            unbinned_length = size(unbinned_data, 2);
+            binned_data = zeros(neurons, floor(unbinned_length / maxpool_bin_width));  % drop last bin of wrong size as will confuse training
+            counter = 1;
+            for i = 1:maxpool_bin_width:unbinned_length - (maxpool_bin_width - 1)
+                binned_data(:, counter) = max(unbinned_data(:, i:i + (maxpool_bin_width - 1)), [], 2);
+                counter = counter + 1;
+            end
+            training_data(t, m).spikes = binned_data;
+            training_data(t, m).bin_width = training_data(t, m).bin_width * maxpool_bin_width;
+        end
+    end
+end
+
+
+function [training_data] = transform_data(training_data, trials, movements, neurons, transform)
+    % Neuron firing can be modelled as a double Poisson point process
+    % (Poisson but with also changing mean)
+    % Poisson-ity means that the variance scales with the mean
+    % Can be bad for regression / dim reduction that assumes homoscedascity
+    % Apply transform (sqrt or anscombe) to make variance more independent of mean
+    if transform == "sqrt"
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = sqrt(training_data(t, m).spikes);
+            end
+        end
+    end
+    if transform == "anscombe"
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = 2 * sqrt(training_data(t, m).spikes + 3 / 8);
+            end
+        end
+    end
+end
+
+
+function [training_data] = convolve_data(training_data, trials, movements, neurons, kernel, kernel_param, kernel_width)
+    % Convolve .spikes with a convolution `kernel` (MA, EMA, CGAUSS, AGAUSS)
+    % For MA `kernel_param` is irrelevant
+    % For EMA `kernel_param` corresponds to alpha
+    % For CGAUSS (causal half-gaussian) `kernel_param` corresponds to std
+    % For AGAUSS (acausal full-gaussain) `kernel_param` corresponds to std
+    if kernel == "MA"
+        ma_kernel = (1 / kernel_width) * ones(1, kernel_width);
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = filter(ma_kernel, [1], training_data(t, m).spikes, [], 2);
+            end
+        end
+    end
+    if kernel == "EMA"
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = filter([kernel_param], [1, kernel_param - 1], training_data(t, m).spikes, [], 2);
+            end
+        end
+    end
+    if kernel == "CGAUSS"
+        n_s = -kernel_width:kernel_width;
+        gauss_kernel = exp(-(n_s).^2 / (2 * kernel_param.^2)) ./ (kernel_param * sqrt(2 * pi));
+        gauss_kernel(n_s < 0) = 0;  % making it causal -- kernel filled during convolution so zero first half
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = conv2(training_data(t, m).spikes, gauss_kernel, "same");
+            end
+        end
+    end
+    if kernel == "AGAUSS"
+        n_s = -kernel_width:kernel_width;
+        gauss_kernel = exp(-(n_s).^2 / (2 * kernel_param.^2)) ./ (kernel_param * sqrt(2 * pi));
+        for t = 1:trials
+            for m = 1:movements
+                training_data(t, m).spikes = conv2(training_data(t, m).spikes, gauss_kernel, "same");
+            end
         end
     end
 end
