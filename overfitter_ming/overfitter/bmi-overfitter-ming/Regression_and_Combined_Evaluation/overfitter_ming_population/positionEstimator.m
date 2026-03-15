@@ -8,6 +8,8 @@ smoothKernel  = modelParameters.smoothKernel;
 prefVec       = modelParameters.prefVec;
 tuningStrength = modelParameters.tuningStrength;
 baselineRate  = modelParameters.baselineRate;
+tuningPower   = 1;
+if isfield(modelParameters, 'tuningPower'), tuningPower = modelParameters.tuningPower; end
 
 raw = testData.spikes;
 cleaned = conv2(1, smoothKernel, raw, 'same');
@@ -21,7 +23,7 @@ else
     Tend = min(size(cleaned,2), dirWindowEnd);
     featEarly = sum(cleaned(:,1:Tend), 2)' / Tend;
     featCentered = featEarly - baselineRate';
-    weightedFeat = featCentered .* tuningStrength';
+    weightedFeat = featCentered .* (tuningStrength .^ tuningPower)';
     popVec = weightedFeat * prefVec;
     angle = atan2(popVec(2), popVec(1));
     d = mod(round(angle / (pi/4)), 8) + 1;

@@ -1,15 +1,13 @@
 function pvModel = trainDirectionClassifierPV(trainingData)
-% Population-vector direction classifier: firing rate + baseline + tuning strength.
-% Same logic as positionEstimatorTraining (improved PV).
-%
-% Output: pvModel.prefVec, pvModel.tuningStrength, pvModel.baselineRate,
-%         pvModel.smoothKernel, pvModel.dirWindowEnd, pvModel.smoothWinLen
+% PV classifier: rate + baseline + tuning strength + min-threshold + power weighting (same as positionEstimatorTraining).
 
 [trials, numDirs] = size(trainingData);
 numNeurons = size(trainingData(1,1).spikes, 1);
 
-dirWindowEnd = 320;
+dirWindowEnd = 320;   % match positionEstimatorTraining
 smoothWinLen = 25;
+minTuningThreshold = 0.15;
+tuningPower = 2;
 
 smoothKernel = ones(1, smoothWinLen) / smoothWinLen;
 
@@ -52,6 +50,7 @@ end
 if max(tuningStrength) > 0
     tuningStrength = tuningStrength / max(tuningStrength);
 end
+tuningStrength(tuningStrength < minTuningThreshold) = 0;
 
 pvModel.prefVec = prefVec;
 pvModel.tuningStrength = tuningStrength;
@@ -59,4 +58,6 @@ pvModel.baselineRate = baselineRate;
 pvModel.smoothKernel = smoothKernel;
 pvModel.dirWindowEnd = dirWindowEnd;
 pvModel.smoothWinLen = smoothWinLen;
+pvModel.minTuningThreshold = minTuningThreshold;
+pvModel.tuningPower = tuningPower;
 end

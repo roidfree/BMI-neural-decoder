@@ -1,5 +1,5 @@
 function modelParameters = positionEstimatorTraining(trainingData)
-% Direction from POPULATION VECTOR using firing rates + baseline correction + tuning strength.
+% Direction from POPULATION VECTOR: rate + baseline + tuning strength + min-threshold + power weighting.
 % Then per-direction velocity regression using rate features.
 
 step = 20;
@@ -10,6 +10,9 @@ dirWindowEnd = 320;
 smoothWinLen = 25;
 lambda = 15;
 avgTrajWeight = 0.4;
+% PV improvements: ignore weakly tuned neurons; emphasize strong modulators
+minTuningThreshold = 0.15;   % zero out neurons with normalized tuning strength below this
+tuningPower = 2;             % use tuningStrength.^tuningPower so well-tuned neurons dominate
 
 numTrials  = size(trainingData,1);
 numNeurons = size(trainingData(1,1).spikes,1);
@@ -56,6 +59,8 @@ end
 if max(tuningStrength) > 0
     tuningStrength = tuningStrength / max(tuningStrength);
 end
+% Zero out weakly tuned neurons (reduces noise from untuned units)
+tuningStrength(tuningStrength < minTuningThreshold) = 0;
 
 %% ---------- 4) Per-direction velocity regression using rate features ----------
 linearModelVx = cell(1,8);
@@ -134,6 +139,8 @@ modelParameters.smoothKernel = smoothKernel;
 modelParameters.prefVec = prefVec;
 modelParameters.tuningStrength = tuningStrength;
 modelParameters.baselineRate = baselineRate;
+modelParameters.minTuningThreshold = minTuningThreshold;
+modelParameters.tuningPower = tuningPower;
 modelParameters.linearModelVx = linearModelVx;
 modelParameters.linearModelVy = linearModelVy;
 modelParameters.featMean = featMean;
