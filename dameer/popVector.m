@@ -1,46 +1,11 @@
 % PSEUDO CODE for Population Vector Decoder (direction)
-
-% Step 1: Compute firing rates in first 320ms - chosen cuz initial spikes more relevant 
-%for each direction d
-%   for each trial t
-%       for each neuron n
-%           rate(t,d,n) = sum(spikes(n,1:320)) / 320; % feature vector 
-%       end
-%   end
-%end
-%----------
-
-% Step 2: Compute preferred direction of each neuron
-% for each neuron n
-%   for each direction d
-%       mean_rate(n,d) = average firing rate(:,d,n) across trials;
-%   end 
-% end
-
-% Step 3: Find the preferred direction for each neuron
-% for each neuron n
-%   combine the 8 direction unit vectors
-%   weight each one by mean_rate(n,d)
-%   preferred_direction(n) = sum(weighted unit vectors)
-% end
-
-%---
-% Testing
-% Compute test firing rates from first 320ms of test trials
-% for each neuron n
-%  test_rate(n) = sum(test spikes(n,1:320)) / 320;
-% end
-
-% Build the population vector for each test trial
-% PV = sum over neurons of test_rate * preferred_direction(n)
-
-% Compute the angle of the population vector
-% take the angle of the PV vector to get the predicted direction
-% angle = atan2(PV_y, PV_x)
-%Choose the closest of the 8 directions...
-
-% -------
-% ACTUAL MATLAB code implementation
+%
+% Step 1: Compute firing rates in first 320ms
+% Step 2: Average those rates across training trials
+% Step 3: Use those averages to find each neuron's preferred direction
+% Step 4: For a test trial, compute firing rates in first 320ms
+% Step 5: Build population vector from all neurons
+% Step 6: Pick the closest of the 8 movement directions
 
 load('monkeydata_training.mat');
 
@@ -49,23 +14,30 @@ num_directions = size(trial, 2);
 num_neurons = size(trial(1,1).spikes, 1);
 T = 320;
 
-% 8 movement angles
+train_idx = 1:50;
+test_idx = 51:100;
+
+if num_trials < 100
+    error('This script expects 100 trials per direction.');
+end
+
 angles = linspace(0, 2*pi, num_directions + 1);
 angles(end) = [];
 
-% Step 1: compute firing rates in first 320 ms
-rate = zeros(num_trials, num_directions, num_neurons);
+% Step 1: firing rates from the training trials
+rate = zeros(length(train_idx), num_directions, num_neurons);
 
 for d = 1:num_directions
-    for t = 1:num_trials
+    for t = 1:length(train_idx)
+        trial_num = train_idx(t);
         for n = 1:num_neurons
-            spike_count = sum(trial(t,d).spikes(n, 1:T));
+            spike_count = sum(trial(trial_num, d).spikes(n, 1:T));
             rate(t,d,n) = spike_count / T;
         end
     end
 end
 
-% Step 2: average firing rate across trials
+% Step 2: average firing rate for each neuron and direction
 mean_rate = zeros(num_neurons, num_directions);
 
 for n = 1:num_neurons
@@ -74,7 +46,7 @@ for n = 1:num_neurons
     end
 end
 
-% Step 3: find preferred direction of each neuron
+% Step 3: preferred direction vector for each neuron
 preferred_direction = zeros(num_neurons, 2);
 
 for n = 1:num_neurons
@@ -89,34 +61,44 @@ for n = 1:num_neurons
     preferred_direction(n,:) = [vx vy];
 end
 
-% example trial to test
-test_trial = trial(50,1);
+% Step 4-6: test on the other 50 trials
+correct = 0;
+total = 0;
 
-% Step 4: compute test firing rates
-test_rate = zeros(num_neurons, 1);
+for d_true = 1:num_directions
+    for t = 1:length(test_idx)
+        trial_num = test_idx(t);
+        test_rate = zeros(num_neurons, 1);
 
-for n = 1:num_neurons
-    test_rate(n) = sum(test_trial.spikes(n, 1:T)) / T;
+        for n = 1:num_neurons
+            test_rate(n) = sum(trial(trial_num, d_true).spikes(n, 1:T)) / T;
+        end
+
+        PV = [0 0];
+
+        for n = 1:num_neurons
+            PV = PV + test_rate(n) * preferred_direction(n,:);
+        end
+
+        predicted_angle = atan2(PV(2), PV(1));
+
+        angle_diff = zeros(num_directions, 1);
+        for d = 1:num_directions
+            angle_diff(d) = abs(atan2(sin(predicted_angle - angles(d)), cos(predicted_angle - angles(d))));
+        end
+
+        [~, predicted_direction] = min(angle_diff);
+
+        if predicted_direction == d_true
+            correct = correct + 1;
+        end
+
+        total = total + 1;
+    end
 end
 
-% Step 5: build population vector
-PV = [0 0];
+accuracy = correct / total;
 
-for n = 1:num_neurons
-    PV = PV + test_rate(n) * preferred_direction(n,:);
-end
-
-% Step 6: convert vector angle into one of the 8 directions
-predicted_angle = atan2(PV(2), PV(1));
-
-angle_diff = zeros(num_directions, 1);
-for d = 1:num_directions
-    angle_diff(d) = abs(atan2(sin(predicted_angle - angles(d)), cos(predicted_angle - angles(d))));
-end
-
-[~, predicted_direction] = min(angle_diff);
-
-fprintf('Predicted direction: %d\n', predicted_direction);
-fprintf('Population vector angle: %.2f radians\n', predicted_angle);
-
-
+fprintf('Training trials per direction: %d\n', length(train_idx));
+fprintf('Testing trials per direction: %d\n', length(test_idx));
+fprintf('Classification accuracy: %.2f%%\n', accuracy * 100);
