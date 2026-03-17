@@ -39,6 +39,34 @@
     % Store model parameters
     modelParameters.means = class_means;
 
+    % MEAN TRAJECTORY
+    % Always provide modelParameters.avgTraj{m} = [mean_x(t); mean_y(t)]
+    avgTraj = cell(movements, 1);
+    T_pad_absolute = 1000;
+    for m = 1:movements
+        Tmax = 0;
+        for t = 1:trials
+            Tmax = max(Tmax, size(training_data(t, m).handPos, 2));
+        end
+
+        sumPos = zeros(2, Tmax);
+        count = zeros(1, Tmax);
+
+        for t = 1:trials
+            pos = training_data(t, m).handPos(1:2, :);
+            T_i = size(pos, 2);
+            sumPos(:, 1:T_i) = sumPos(:, 1:T_i) + pos;
+            count(1:T_i) = count(1:T_i) + 1;
+        end
+
+        count(count == 0) = 1;
+        mean_path = sumPos ./ repmat(count, 2, 1);
+        padded_path(:, 1:Tmax) = mean_path;
+        padded_path(:, Tmax+1:end) = repmat(mean_path(:, end), 1, T_pad_absolute - Tmax);
+        avgTraj{m} = padded_path;
+    end
+    modelParameters.avgTraj = avgTraj;
+
     % PREPROCESSING
 
     % Initialise bin_width field
@@ -54,9 +82,27 @@
     % Apply Anscombe transform for ~constant variance and Gaussinity
     processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
 
-    % REGRESSION
+    % TRAINING DATA CREATION
+    % Produce matrices for average velocity regression -- MINIMUM TRIAL
+    % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
+    % history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
+    % bin_width = processed_data(1, 1).bin_width;
+    % max_iter = floor(571 / bin_width) - history_bins;
+    % X = zeros(movements, trials * max_iter, neurons * (history_bins + 1));
+    % Y = zeros(movements, trials * max_iter, 2); % X avg velocity in col 1 and Y in 2
+    % for m = 1:movements
+    %     counter = 1;
+    %     for t = 1:trials
+    %         for i = 1:max_iter
+    %             X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+    %             Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+    %             Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+    %             counter = counter + 1;
+    %         end
+    %     end
+    % end
 
-    % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
+    % Produce matrices for average deviation regression -- MINIMUM TRIAL
     % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
     history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
     bin_width = processed_data(1, 1).bin_width;
@@ -68,8 +114,8 @@
         for t = 1:trials
             for i = 1:max_iter
                 X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
-                Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
-                Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+                Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - modelParameters.avgTraj{m}(1, (history_bins + i) * bin_width);
+                Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - modelParameters.avgTraj{m}(2, (history_bins + i) * bin_width);
                 counter = counter + 1;
             end
         end

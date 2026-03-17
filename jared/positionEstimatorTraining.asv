@@ -39,6 +39,27 @@
     % Store model parameters
     modelParameters.means = class_means;
 
+    % MEAN TRAJECTORY
+    % Always provide modelParameters.avgTraj{m} = [mean_x(t); mean_y(t)]
+    avgTraj = cell(movements, 1);
+    for m = 1:movements
+        Tmax = 560;
+
+        sumPos = zeros(2, Tmax);
+        count = zeros(1, Tmax);
+
+        for t = 1:trials
+            pos = training_data(t, m).handPos(1:2, :);
+            T_i = size(pos, 2);
+            sumPos(:, 1:T_i) = sumPos(:, 1:T_i) + pos;
+            count(1:T_i) = count(1:T_i) + 1;
+        end
+
+        count(count == 0) = 1;
+        avgTraj{m} = sumPos ./ repmat(count, 2, 1);
+    end
+    modelParameters.avgTraj = avgTraj;
+
     % PREPROCESSING
 
     % Initialise bin_width field
@@ -54,9 +75,27 @@
     % Apply Anscombe transform for ~constant variance and Gaussinity
     processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
 
-    % REGRESSION
+    % TRAINING DATA CREATION
+    % Produce matrices for average velocity regression -- MINIMUM TRIAL
+    % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
+    % history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
+    % bin_width = processed_data(1, 1).bin_width;
+    % max_iter = floor(571 / bin_width) - history_bins;
+    % X = zeros(movements, trials * max_iter, neurons * (history_bins + 1));
+    % Y = zeros(movements, trials * max_iter, 2); % X avg velocity in col 1 and Y in 2
+    % for m = 1:movements
+    %     counter = 1;
+    %     for t = 1:trials
+    %         for i = 1:max_iter
+    %             X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+    %             Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+    %             Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+    %             counter = counter + 1;
+    %         end
+    %     end
+    % end
 
-    % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
+    % Produce matrices for average deviation regression -- MINIMUM TRIAL
     % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
     history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
     bin_width = processed_data(1, 1).bin_width;
@@ -107,7 +146,7 @@
     % end
 
     % PCR with ridge regression
-    lambda = 0.5;
+    lambda = 1000;
     for m = 1:movements
         Xmov = squeeze(X(m, :, :));
         Ymov = squeeze(Y(m, :, :));
@@ -115,15 +154,17 @@
         modelParameters.mu_X{m} = mu_X;
         centred_X = Xmov - mu_X;
         [U, S, V] = svd(centred_X);
-        PCs = 100;
+        PCs = 500;
         U_reduced = U(:, 1:PCs);
         S_reduced = S(1:PCs, 1:PCs);
         V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
         modelParameters.V_reduced{m} = V_reduced;
         eigen_X = centred_X * V_reduced;
         eigen_X = [eigen_X, ones(trials * max_iter, 1)];
-        modelParameters.B{m} = (eigen_X' * eigen_X + lambda * eye(PCs + 1)) \ (eigen_X' * Ymov);
-        % plus one on 
+        penalty = lambda * eye(PCs + 1);
+        penalty(end, end) = 0; % DO NOT PENALISE BIAS
+        modelParameters.B{m} = (eigen_X' * eigen_X + penalty) \ (eigen_X' * Ymov);
+        % plus one on lambda for bias
     end
 
 end
