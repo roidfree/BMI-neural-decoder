@@ -25,6 +25,7 @@ function [x, y] = positionEstimator(test_data, modelParameters)
     V_reduceds = modelParameters.V_reduced;
 
     % Hyperparameters (Must exactly match the training script)
+    t_now = size(test_data.spikes, 2);
     bin_width = 20;
     history_bins = 15; % Number of lag bins. Total bins used = 16 (320ms)
     neurons = 98;
@@ -57,25 +58,17 @@ function [x, y] = positionEstimator(test_data, modelParameters)
     % Append the bias term (1) to match the B matrix
     X_eigen = [X_eigen, 1];
     
-    % --- 4. PREDICT VELOCITY ---
+    % --- 4. PREDICT DEVIATION ---
     % Multiply our compressed feature vector by the trained weights matrix
-    predicted_velocity = X_eigen * Bs{trialDir}; 
+    predicted_deviation = X_eigen * Bs{trialDir}; 
     
     % --- 5. ESTIMATE CONTINUOUS POSITION ---
-    % Position = Previous Position + Predicted Velocity
-    if isempty(test_data.decodedHandPos)
-        % First prediction at 320ms uses the starting coordinate.
-        prev_x = test_data.startHandPos(1);
-        prev_y = test_data.startHandPos(2);
-    else
-        % Subsequent predictions grab the last X and Y from decodedHandPos
-        prev_x = test_data.decodedHandPos(1, end);
-        prev_y = test_data.decodedHandPos(2, end);
-    end
-    
-    % Output the newly estimated coordinates
-    x = prev_x + predicted_velocity(1);
-    y = prev_y + predicted_velocity(2);
+    % Position = Mean_position + Previous Deviation + New Deviation
+    traj = modelParameters.avgTraj{trialDir};
+    x_mean = traj(1, t_now);
+    y_mean = traj(2, t_now);
+    x = x_mean + predicted_deviation(:, 1);
+    y = y_mean + predicted_deviation(:, 2);
 end
 
 

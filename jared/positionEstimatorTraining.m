@@ -61,6 +61,7 @@
 
         count(count == 0) = 1;
         mean_path = sumPos ./ repmat(count, 2, 1);
+        padded_path = zeros(2, T_pad_absolute);
         padded_path(:, 1:Tmax) = mean_path;
         padded_path(:, Tmax+1:end) = repmat(mean_path(:, end), 1, T_pad_absolute - Tmax);
         avgTraj{m} = padded_path;
