@@ -60,15 +60,26 @@ function [x, y] = positionEstimator(test_data, modelParameters)
     
     % --- 4. PREDICT DEVIATION ---
     % Multiply our compressed feature vector by the trained weights matrix
-    predicted_deviation = X_eigen * Bs{trialDir}; 
+    predicted_vdeviation = X_eigen * Bs{trialDir}; 
     
     % --- 5. ESTIMATE CONTINUOUS POSITION ---
     % Position = Mean_position + Previous Deviation + New Deviation
     traj = modelParameters.avgTraj{trialDir};
-    x_mean = traj(1, t_now);
-    y_mean = traj(2, t_now);
-    x = x_mean + predicted_deviation(:, 1);
-    y = y_mean + predicted_deviation(:, 2);
+    vx_mean = traj(1, t_now) - traj(1, t_now - 20);
+    vy_mean = traj(2, t_now) - traj(2, t_now - 20);
+    if isempty(test_data.decodedHandPos)
+        % First prediction at 320ms uses the starting coordinate.
+        prev_x = test_data.startHandPos(1);
+        prev_y = test_data.startHandPos(2);
+    else
+        % Subsequent predictions grab the last X and Y from decodedHandPos
+        prev_x = test_data.decodedHandPos(1, end);
+        prev_y = test_data.decodedHandPos(2, end);
+    end
+    
+    % Output the newly estimated coordinates
+    x = prev_x + predicted_vdeviation(1) + vx_mean;
+    y = prev_y + predicted_vdeviation(2) + vy_mean;
 end
 
 
