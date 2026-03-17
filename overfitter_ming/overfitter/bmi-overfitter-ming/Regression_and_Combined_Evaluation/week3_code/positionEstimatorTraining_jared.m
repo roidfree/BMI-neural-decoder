@@ -1,10 +1,46 @@
-function [modelParameters] = positionEstimatorTraining(training_data)
+ function [modelParameters] = positionEstimatorTraining(training_data)
     modelParameters = struct;
     processed_data = training_data;
     trials = size(training_data, 1);
     movements = size(training_data, 2);
     neurons = 98;
     
+    % CLASSIFICATION
+    A = [];
+    B = [];
+
+    % Loop through all directions and trials
+    for m = 1:movements
+        for t = 1:trials
+
+            % Extract spike data
+            spikes = training_data(t,m).spikes;
+
+            % Feature: spike counts in first 320 ms
+            feat = sum(spikes(:,1:320),2)';
+
+            % Store feature and corresponding label
+            A = [A; feat];
+            B = [B; m];
+
+        end
+    end
+
+    % Get dimensions
+    [n_samples, n_features] = size(A);
+
+    % Compute class means (one per direction)
+    class_means = zeros(movements, n_features);
+
+    for k = 1:movements
+        class_means(k,:) = mean(A(B==k,:), 1);
+    end
+    
+    % Store model parameters
+    modelParameters.means = class_means;
+
+    % PREPROCESSING
+
     % Initialise bin_width field
     for t = 1:trials
         for m = 1:movements
@@ -18,47 +54,58 @@ function [modelParameters] = positionEstimatorTraining(training_data)
     % Apply Anscombe transform for ~constant variance and Gaussinity
     processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
 
+    % REGRESSION
+
     % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
     % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
     history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
     bin_width = processed_data(1, 1).bin_width;
     max_iter = floor(571 / bin_width) - history_bins;
-    X = zeros(trials * movements * max_iter, neurons * (history_bins + 1));
-    Y = zeros(trials * movements * max_iter, 2); % X avg velocity in col 1 and Y in 2
-    counter = 1;
-    for t = 1:trials
-        for m = 1:movements
+    X = zeros(movements, trials * max_iter, neurons * (history_bins + 1));
+    Y = zeros(movements, trials * max_iter, 2); % X avg velocity in col 1 and Y in 2
+    for m = 1:movements
+        counter = 1;
+        for t = 1:trials
             for i = 1:max_iter
-                X(counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
-                Y(counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
-                Y(counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+                X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+                Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+                Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
                 counter = counter + 1;
             end
         end
     end
 
+    modelParameters.B = cell(movements, 1);
+    modelParameters.mu_X = cell(movements, 1);
+    modelParameters.V_reduced = cell(movements, 1);
+
     % OLS
     % Have a bias input just in case
-    %X = [X, ones(trials * movements * max_iter, 1)];
-    %B = X \ Y;
+    % WON'T HAVE ENOUGH DATA TO TRAIN THE WEIGHTS FOR OLS
+    % for m = 1:movements
+    %     Xmov = [squeeze(X(m, :, :)), ones(trials * max_iter, 1)];
+    %     Ymov = squeeze(Y(m, :, :));
+    %     modelParameters.B{m} = Xmov \ Ymov;
+    % end
 
     % PCR
-    mu_X = mean(X, 1);
-    centred_X = X - mu_X;
-    [U, S, V] = svd(centred_X);
-    PCs = 500;
-    U_reduced = U(:, 1:PCs);
-    S_reduced = S(1:PCs, 1:PCs);
-    V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
-    eigen_X = centred_X * V_reduced;
-    eigen_X = [eigen_X, ones(trials * movements * max_iter, 1)];
-    B = eigen_X \ Y;
+    for m = 1:movements
+        Xmov = squeeze(X(m, :, :));
+        Ymov = squeeze(Y(m, :, :));
+        mu_X = mean(Xmov, 1);
+        modelParameters.mu_X{m} = mu_X;
+        centred_X = Xmov - mu_X;
+        [U, S, V] = svd(centred_X);
+        PCs = 100;
+        U_reduced = U(:, 1:PCs);
+        S_reduced = S(1:PCs, 1:PCs);
+        V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
+        modelParameters.V_reduced{m} = V_reduced;
+        eigen_X = centred_X * V_reduced;
+        eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+        modelParameters.B{m} = eigen_X \ Ymov;
+    end
 
-
-    % Pass out for testing
-    modelParameters.B = B;
-    modelParameters.mu_X = mu_X;
-    modelParameters.V_reduced = V_reduced;
 end
 
 

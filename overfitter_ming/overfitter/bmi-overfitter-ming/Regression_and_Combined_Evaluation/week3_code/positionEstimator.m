@@ -1,6 +1,6 @@
 function [x, y] = positionEstimator(test_data, modelParameters)
-% Merge: use LDA to classify direction once per trial, then apply
-% direction-conditional PCR regression to predict velocity and integrate.
+% Updated to match Jared's latest: cosine-template direction classification
+% + mean trajectory decoding (most stable baseline).
 
     persistent trialDir;
     spikes = test_data.spikes;
@@ -13,39 +13,48 @@ function [x, y] = positionEstimator(test_data, modelParameters)
 
     % ---- 1) Direction classification (only once per trial) ----
     if isempty(trialDir)
-        feat = sum(spikes(:, 1:320), 2)'; % 1 x neurons
-        trialDir = lda_predict_class(feat, modelParameters.lda_means, modelParameters.lda_Sigma_inv);
+        featDir = sum(spikes(:, 1:320), 2)';
+        cosine_sims = (modelParameters.means * featDir') ./ (vecnorm(modelParameters.means, 2, 2) * norm(featDir));
+        [~, trialDir] = max(cosine_sims);
     end
 
     % ---- 2) Regression feature extraction (match training preprocessing) ----
-    bin_width = modelParameters.bin_width;
-    history_bins = modelParameters.history_bins;
-    neurons = modelParameters.neurons;
+    t_now = size(test_data.spikes, 2);
+
+    % Prefer mean trajectory if available (stable baseline)
+    if isfield(modelParameters, "avgTraj")
+        traj = modelParameters.avgTraj{trialDir};
+        t_idx = min(t_now, size(traj, 2));
+        x = traj(1, t_idx);
+        y = traj(2, t_idx);
+        return;
+    end
+
+    % Fallback: per-direction PCR velocity + integration (older modelParameters)
+    Bs = modelParameters.B;
+    mu_Xs = modelParameters.mu_X;
+    V_reduceds = modelParameters.V_reduced;
+
+    bin_width = 20;
+    history_bins = 15;
+    neurons = size(test_data.spikes, 1);
 
     pseudo = struct();
-    pseudo(1, 1).spikes = spikes;
+    pseudo(1, 1).spikes = test_data.spikes;
     pseudo(1, 1).bin_width = 1;
 
     pseudo = rebin_data(pseudo, 1, 1, neurons, bin_width);
-    pseudo = transform_data(pseudo, 1, 1, "anscombe");
+    pseudo = transform_data(pseudo, 1, 1, neurons, "anscombe");
     proc_spikes = pseudo(1, 1).spikes;
 
     needed = history_bins + 1;
-    if size(proc_spikes, 2) >= needed
-        recent = proc_spikes(:, end - needed + 1:end);
-    else
-        pad = zeros(neurons, needed - size(proc_spikes, 2));
-        recent = [pad, proc_spikes];
-    end
+    recent = proc_spikes(:, end - needed + 1:end);
     X_test = reshape(recent, 1, []);
 
-    % PCA projection + bias
-    X_centered = X_test - modelParameters.mu_X;
-    X_eigen = X_centered * modelParameters.V_reduced;
+    X_centered = X_test - mu_Xs{trialDir};
+    X_eigen = X_centered * V_reduceds{trialDir};
     X_eigen = [X_eigen, 1];
-
-    % ---- 3) Predict velocity and integrate to position ----
-    v = X_eigen * modelParameters.B{trialDir}; % 1x2
+    v = X_eigen * Bs{trialDir};
 
     if isempty(test_data.decodedHandPos)
         prev_x = test_data.startHandPos(1);
@@ -57,19 +66,6 @@ function [x, y] = positionEstimator(test_data, modelParameters)
 
     x = prev_x + v(1);
     y = prev_y + v(2);
-end
-
-function cls = lda_predict_class(x, means, Sigma_inv)
-% x: 1xd, means: Kxd, Sigma_inv: dxd
-% LDA discriminant with equal priors:
-% delta_k = x*inv(Sigma)*mu_k' - 0.5*mu_k*inv(Sigma)*mu_k'
-    K = size(means, 1);
-    scores = zeros(K, 1);
-    for k = 1:K
-        mu = means(k, :);
-        scores(k) = x * Sigma_inv * mu' - 0.5 * (mu * Sigma_inv * mu');
-    end
-    [~, cls] = max(scores);
 end
 
 function training_data = rebin_data(training_data, trials, movements, neurons, new_bin_width)
@@ -92,7 +88,8 @@ function training_data = rebin_data(training_data, trials, movements, neurons, n
     end
 end
 
-function training_data = transform_data(training_data, trials, movements, transform)
+function training_data = transform_data(training_data, trials, movements, neurons, transform)
+    %#ok<INUSD>
     if transform == "none"
         return;
     end
@@ -113,4 +110,5 @@ function training_data = transform_data(training_data, trials, movements, transf
         return;
     end
 end
+
 

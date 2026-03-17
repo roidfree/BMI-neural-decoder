@@ -1,110 +1,100 @@
-function modelParameters = positionEstimatorTraining(training_data)
+function [modelParameters] = positionEstimatorTraining(training_data)
+% Updated to match Jared's latest: cosine-template direction classification
+% + per-direction PCR (mu_X{dir}, V_reduced{dir}, B{dir}).
 
-    [trials, movements] = size(training_data);
+    modelParameters = struct;
+    processed_data = training_data;
+    trials = size(training_data, 1);
+    movements = size(training_data, 2);
     neurons = size(training_data(1, 1).spikes, 1);
 
-    % ---- Hyperparameters (must match positionEstimator.m) ----
-    bin_width = 20;        % ms bins for regression features
-    history_bins = 15;     % total bins used = history_bins+1 (e.g. 16 => 320ms)
-    PCs = 500;             % # principal components for PCR
-
-    % ---- 1) Train direction classifier ----
-    X_lda = zeros(trials * movements, neurons);
-    Y_lda = zeros(trials * movements, 1);
-    c = 1;
+    % ---- CLASSIFICATION ----
+    A = [];
+    B = [];
     for m = 1:movements
         for t = 1:trials
             spikes = training_data(t, m).spikes;
-            X_lda(c, :) = sum(spikes(:, 1:320), 2)';
-            Y_lda(c) = m;
-            c = c + 1;
+            feat = sum(spikes(:, 1:320), 2)';
+            A = [A; feat]; %#ok<AGROW>
+            B = [B; m]; %#ok<AGROW>
         end
     end
-
-    lda_means = zeros(movements, neurons);
+    [~, n_features] = size(A);
+    class_means = zeros(movements, n_features);
     for k = 1:movements
-        lda_means(k, :) = mean(X_lda(Y_lda == k, :), 1);
+        class_means(k, :) = mean(A(B == k, :), 1);
     end
-    lambda = 0.01;
-    lda_Sigma = cov(X_lda) + lambda * eye(neurons);
-    lda_Sigma_inv = inv(lda_Sigma);
+    modelParameters.means = class_means;
 
-    % ---- 2) Train regression model ----
-    processed = init_bin_width(training_data);
-    processed = rebin_data(processed, trials, movements, neurons, bin_width);
-    processed = transform_data(processed, trials, movements, "anscombe");
-
-    max_handpos_len = min_handpos_length(processed, trials, movements);
-    max_iter = floor(max_handpos_len / bin_width) - history_bins;
-    if max_iter < 1
-        error("Not enough data length for chosen bin_width/history_bins.");
-    end
-
-    % Build X matrices per direction and a global X for PCA basis
-    X_dir = cell(movements, 1);
-    Y_dir = cell(movements, 1);
+    % ---- MEAN TRAJECTORY (most stable baseline) ----
+    avgTraj = cell(movements, 1);
     for m = 1:movements
-        X_dir{m} = zeros(trials * max_iter, neurons * (history_bins + 1));
-        Y_dir{m} = zeros(trials * max_iter, 2);
-    end
+        Tmax = 0;
+        for t = 1:trials
+            Tmax = max(Tmax, size(training_data(t, m).handPos, 2));
+        end
 
+        sumPos = zeros(2, Tmax);
+        count = zeros(1, Tmax);
+
+        for t = 1:trials
+            pos = training_data(t, m).handPos(1:2, :);
+            T_i = size(pos, 2);
+            sumPos(:, 1:T_i) = sumPos(:, 1:T_i) + pos;
+            count(1:T_i) = count(1:T_i) + 1;
+        end
+
+        count(count == 0) = 1;
+        avgTraj{m} = sumPos ./ repmat(count, 2, 1);
+    end
+    modelParameters.avgTraj = avgTraj;
+
+    % ---- PREPROCESSING ----
+    for t = 1:trials
+        for m = 1:movements
+            processed_data(t, m).bin_width = 1;
+        end
+    end
+    processed_data = rebin_data(processed_data, trials, movements, neurons, 20);
+    processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
+
+    % ---- REGRESSION ----
+    history_bins = 15;
+    bin_width = processed_data(1, 1).bin_width;
+    max_iter = floor(571 / bin_width) - history_bins;
+
+    X = zeros(movements, trials * max_iter, neurons * (history_bins + 1));
+    Y = zeros(movements, trials * max_iter, 2);
     for m = 1:movements
-        row = 1;
+        counter = 1;
         for t = 1:trials
             for i = 1:max_iter
-                X_dir{m}(row, :) = reshape(processed(t, m).spikes(:, i:history_bins + i), 1, []);
-                t2 = (history_bins + i) * bin_width;
-                t1 = (history_bins + i - 1) * bin_width;
-                Y_dir{m}(row, 1) = processed(t, m).handPos(1, t2) - processed(t, m).handPos(1, t1);
-                Y_dir{m}(row, 2) = processed(t, m).handPos(2, t2) - processed(t, m).handPos(2, t1);
-                row = row + 1;
+                X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+                Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+                Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+                counter = counter + 1;
             end
         end
     end
 
-    X_all = vertcat(X_dir{:});
-    mu_X = mean(X_all, 1);
-    centred_X = X_all - mu_X;
-    [~, ~, V] = svd(centred_X, "econ");
-    PCs = min(PCs, size(V, 2));
-    V_reduced = V(:, 1:PCs);
+    modelParameters.B = cell(movements, 1);
+    modelParameters.mu_X = cell(movements, 1);
+    modelParameters.V_reduced = cell(movements, 1);
 
-    B = cell(movements, 1);
     for m = 1:movements
-        Xc = X_dir{m} - mu_X;
-        Xe = Xc * V_reduced;
-        Xe = [Xe, ones(size(Xe, 1), 1)];
-        B{m} = Xe \ Y_dir{m};
-    end
-
-    modelParameters = struct();
-    modelParameters.bin_width = bin_width;
-    modelParameters.history_bins = history_bins;
-    modelParameters.neurons = neurons;
-
-    modelParameters.mu_X = mu_X;
-    modelParameters.V_reduced = V_reduced;
-    modelParameters.B = B;
-
-    modelParameters.lda_means = lda_means;
-    modelParameters.lda_Sigma_inv = lda_Sigma_inv;
-end
-
-function training_data = init_bin_width(training_data)
-    [trials, movements] = size(training_data);
-    for t = 1:trials
-        for m = 1:movements
-            training_data(t, m).bin_width = 1;
-        end
-    end
-end
-
-function L = min_handpos_length(training_data, trials, movements)
-    L = inf;
-    for t = 1:trials
-        for m = 1:movements
-            L = min(L, size(training_data(t, m).handPos, 2));
-        end
+        Xmov = squeeze(X(m, :, :));
+        Ymov = squeeze(Y(m, :, :));
+        mu_X = mean(Xmov, 1);
+        modelParameters.mu_X{m} = mu_X;
+        centred_X = Xmov - mu_X;
+        [~, ~, V] = svd(centred_X);
+        PCs = 100;
+        PCs = min(PCs, size(V, 2));
+        V_reduced = V(:, 1:PCs);
+        modelParameters.V_reduced{m} = V_reduced;
+        eigen_X = centred_X * V_reduced;
+        eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+        modelParameters.B{m} = eigen_X \ Ymov;
     end
 end
 
@@ -128,7 +118,8 @@ function training_data = rebin_data(training_data, trials, movements, neurons, n
     end
 end
 
-function training_data = transform_data(training_data, trials, movements, transform)
+function training_data = transform_data(training_data, trials, movements, neurons, transform)
+    %#ok<INUSD>
     if transform == "none"
         return;
     end
