@@ -89,6 +89,25 @@
     % end
 
     % PCR
+    % for m = 1:movements
+    %     Xmov = squeeze(X(m, :, :));
+    %     Ymov = squeeze(Y(m, :, :));
+    %     mu_X = mean(Xmov, 1);
+    %     modelParameters.mu_X{m} = mu_X;
+    %     centred_X = Xmov - mu_X;
+    %     [U, S, V] = svd(centred_X);
+    %     PCs = 100;
+    %     U_reduced = U(:, 1:PCs);
+    %     S_reduced = S(1:PCs, 1:PCs);
+    %     V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
+    %     modelParameters.V_reduced{m} = V_reduced;
+    %     eigen_X = centred_X * V_reduced;
+    %     eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+    %     modelParameters.B{m} = eigen_X \ Ymov;
+    % end
+
+    % PCR with ridge regression
+    lambda = 1000;
     for m = 1:movements
         Xmov = squeeze(X(m, :, :));
         Ymov = squeeze(Y(m, :, :));
@@ -96,14 +115,17 @@
         modelParameters.mu_X{m} = mu_X;
         centred_X = Xmov - mu_X;
         [U, S, V] = svd(centred_X);
-        PCs = 100;
+        PCs = 500;
         U_reduced = U(:, 1:PCs);
         S_reduced = S(1:PCs, 1:PCs);
         V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
         modelParameters.V_reduced{m} = V_reduced;
         eigen_X = centred_X * V_reduced;
         eigen_X = [eigen_X, ones(trials * max_iter, 1)];
-        modelParameters.B{m} = eigen_X \ Ymov;
+        penalty = lambda * eye(PCs + 1);
+        penalty(end, end) = 0; % DO NOT PENALISE BIAS
+        modelParameters.B{m} = (eigen_X' * eigen_X + penalty) \ (eigen_X' * Ymov);
+        % plus one on lambda for bias
     end
 
 end

@@ -5,7 +5,7 @@
     movements = size(training_data, 2);
     neurons = 98;
     
-    % Classification
+    % CLASSIFICATION
     A = [];
     B = [];
 
@@ -27,25 +27,19 @@
     end
 
     % Get dimensions
-    [n_samples, n_features] = size(X);
+    [n_samples, n_features] = size(A);
 
     % Compute class means (one per direction)
     class_means = zeros(movements, n_features);
 
     for k = 1:movements
-        class_means(k,:) = mean(X(Y==k,:), 1);
+        class_means(k,:) = mean(A(B==k,:), 1);
     end
-
-    % Compute regularised covariance matrix
-    lambda = 0.01;
-    Sigma = cov(X) + lambda * eye(n_features);
-
-    % Invert covariance matrix
-    Sigma_inv = inv(Sigma);
-
+    
     % Store model parameters
     modelParameters.means = class_means;
-    modelParameters.Sigma_inv = Sigma_inv;
+
+    % PREPROCESSING
 
     % Initialise bin_width field
     for t = 1:trials
@@ -59,6 +53,8 @@
 
     % Apply Anscombe transform for ~constant variance and Gaussinity
     processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
+
+    % REGRESSION
 
     % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
     % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
@@ -93,11 +89,30 @@
     % end
 
     % PCR
+    % for m = 1:movements
+    %     Xmov = squeeze(X(m, :, :));
+    %     Ymov = squeeze(Y(m, :, :));
+    %     mu_X = mean(Xmov, 1);
+    %     modelParameters.mu_X{m} = mu_X;
+    %     centred_X = Xmov - mu_X;
+    %     [U, S, V] = svd(centred_X);
+    %     PCs = 100;
+    %     U_reduced = U(:, 1:PCs);
+    %     S_reduced = S(1:PCs, 1:PCs);
+    %     V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
+    %     modelParameters.V_reduced{m} = V_reduced;
+    %     eigen_X = centred_X * V_reduced;
+    %     eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+    %     modelParameters.B{m} = eigen_X \ Ymov;
+    % end
+
+    % PCR with ridge regression
+    lambda = 0.5;
     for m = 1:movements
         Xmov = squeeze(X(m, :, :));
         Ymov = squeeze(Y(m, :, :));
         mu_X = mean(Xmov, 1);
-        modelParameters.mu_X{m} = mu_X
+        modelParameters.mu_X{m} = mu_X;
         centred_X = Xmov - mu_X;
         [U, S, V] = svd(centred_X);
         PCs = 100;
@@ -107,7 +122,8 @@
         modelParameters.V_reduced{m} = V_reduced;
         eigen_X = centred_X * V_reduced;
         eigen_X = [eigen_X, ones(trials * max_iter, 1)];
-        modelParameters.B{m} = eigen_X \ Ymov;
+        modelParameters.B{m} = (eigen_X' * eigen_X + lambda * eye(PCs + 1)) \ (eigen_X' * Ymov);
+        % plus one on 
     end
 
 end
