@@ -5,6 +5,48 @@
     movements = size(training_data, 2);
     neurons = 98;
     
+    % Classification
+    A = [];
+    B = [];
+
+    % Loop through all directions and trials
+    for m = 1:movements
+        for t = 1:trials
+
+            % Extract spike data
+            spikes = training_data(t,m).spikes;
+
+            % Feature: spike counts in first 320 ms
+            feat = sum(spikes(:,1:320),2)';
+
+            % Store feature and corresponding label
+            A = [A; feat];
+            B = [B; m];
+
+        end
+    end
+
+    % Get dimensions
+    [n_samples, n_features] = size(X);
+
+    % Compute class means (one per direction)
+    class_means = zeros(movements, n_features);
+
+    for k = 1:movements
+        class_means(k,:) = mean(X(Y==k,:), 1);
+    end
+
+    % Compute regularised covariance matrix
+    lambda = 0.01;
+    Sigma = cov(X) + lambda * eye(n_features);
+
+    % Invert covariance matrix
+    Sigma_inv = inv(Sigma);
+
+    % Store model parameters
+    modelParameters.means = class_means;
+    modelParameters.Sigma_inv = Sigma_inv;
+
     % Initialise bin_width field
     for t = 1:trials
         for m = 1:movements
@@ -52,23 +94,22 @@
 
     % PCR
     for m = 1:movements
-        mu_X = mean(X, 1);
-        centred_X = X - mu_X;
+        Xmov = squeeze(X(m, :, :));
+        Ymov = squeeze(Y(m, :, :));
+        mu_X = mean(Xmov, 1);
+        modelParameters.mu_X{m} = mu_X
+        centred_X = Xmov - mu_X;
         [U, S, V] = svd(centred_X);
-        PCs = 500;
+        PCs = 100;
         U_reduced = U(:, 1:PCs);
         S_reduced = S(1:PCs, 1:PCs);
         V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
+        modelParameters.V_reduced{m} = V_reduced;
         eigen_X = centred_X * V_reduced;
-        eigen_X = [eigen_X, ones(trials * movements * max_iter, 1)];
-        B = eigen_X \ Y;
+        eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+        modelParameters.B{m} = eigen_X \ Ymov;
     end
 
-
-    % Pass out for testing
-    modelParameters.B = B;
-    modelParameters.mu_X = mu_X;
-    modelParameters.V_reduced = V_reduced;
 end
 
 

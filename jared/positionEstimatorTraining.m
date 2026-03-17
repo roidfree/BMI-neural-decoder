@@ -5,6 +5,50 @@
     movements = size(training_data, 2);
     neurons = 98;
     
+    % CLASSIFICATION
+    A = [];
+    B = [];
+
+    % Loop through all directions and trials
+    for m = 1:movements
+        for t = 1:trials
+
+            % Extract spike data
+            spikes = training_data(t,m).spikes;
+
+            % Feature: spike counts in first 320 ms
+            feat = sum(spikes(:,1:320),2)';
+
+            % Store feature and corresponding label
+            A = [A; feat];
+            B = [B; m];
+
+        end
+    end
+
+    % Get dimensions
+    [n_samples, n_features] = size(A);
+
+    % Compute class means (one per direction)
+    class_means = zeros(movements, n_features);
+
+    for k = 1:movements
+        class_means(k,:) = mean(A(B==k,:), 1);
+    end
+
+    % Compute regularised covariance matrix
+    lambda = 0.01;
+    Sigma = cov(A) + lambda * eye(n_features);
+
+    % Invert covariance matrix
+    Sigma_inv = inv(Sigma);
+
+    % Store model parameters
+    modelParameters.means = class_means;
+    modelParameters.Sigma_inv = Sigma_inv;
+
+    % PREPROCESSING
+
     % Initialise bin_width field
     for t = 1:trials
         for m = 1:movements
@@ -17,6 +61,8 @@
 
     % Apply Anscombe transform for ~constant variance and Gaussinity
     processed_data = transform_data(processed_data, trials, movements, neurons, "anscombe");
+
+    % REGRESSION
 
     % Produce OLS matrices for average velocity regression -- MINIMUM TRIAL
     % LENGTH IS 571 THUS CAN ONLY GO UP TO 560
@@ -67,7 +113,7 @@
         eigen_X = [eigen_X, ones(trials * max_iter, 1)];
         modelParameters.B{m} = eigen_X \ Ymov;
     end
-    
+
 end
 
 
