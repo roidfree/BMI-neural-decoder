@@ -35,17 +35,9 @@
     for k = 1:movements
         class_means(k,:) = mean(A(B==k,:), 1);
     end
-
-    % Compute regularised covariance matrix
-    lambda = 0.01;
-    Sigma = cov(A) + lambda * eye(n_features);
-
-    % Invert covariance matrix
-    Sigma_inv = inv(Sigma);
-
+    
     % Store model parameters
     modelParameters.means = class_means;
-    modelParameters.Sigma_inv = Sigma_inv;
 
     % PREPROCESSING
 
@@ -101,7 +93,7 @@
         Xmov = squeeze(X(m, :, :));
         Ymov = squeeze(Y(m, :, :));
         mu_X = mean(Xmov, 1);
-        modelParameters.mu_X{m} = mu_X
+        modelParameters.mu_X{m} = mu_X;
         centred_X = Xmov - mu_X;
         [U, S, V] = svd(centred_X);
         PCs = 100;

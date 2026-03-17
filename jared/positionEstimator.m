@@ -1,9 +1,29 @@
 function [x, y] = positionEstimator(test_data, modelParameters)
-    % Extract the trained PCR parameters
-    B = modelParameters.B;
-    mu_X = modelParameters.mu_X;
-    V_reduced = modelParameters.V_reduced;
+    % CLASSIFICATION
+    persistent trialDir;
+    spikes = test_data.spikes; 
+    T = size(spikes, 2);
     
+    if T <= 320 
+        trialDir = []; % Reset for new trial 
+    end
+
+    % 1. Direction Classification (First chunk)
+    if isempty(trialDir)
+        featDir = sum(spikes(:, 1:320), 2)';
+        
+        cosine_sims = (modelParameters.means * featDir') ./ (vecnorm(modelParameters.means, 2, 2) * norm(featDir));
+        
+        [~, trialDir] = max(cosine_sims);
+    end
+
+    % HOUSE KEEPING
+
+    % Extract the trained PCR parameters
+    Bs = modelParameters.B;
+    mu_Xs = modelParameters.mu_X;
+    V_reduceds = modelParameters.V_reduced;
+
     % Hyperparameters (Must exactly match the training script)
     bin_width = 20;
     history_bins = 15; % Number of lag bins. Total bins used = 16 (320ms)
@@ -31,15 +51,15 @@ function [x, y] = positionEstimator(test_data, modelParameters)
     
     % --- 3. PCA PROJECTION ---
     % Center the data using the training mean, then project down to 500 PCs
-    X_centered = X_test - mu_X;
-    X_eigen = X_centered * V_reduced;
+    X_centered = X_test - mu_Xs{trialDir};
+    X_eigen = X_centered * V_reduceds{trialDir};
     
     % Append the bias term (1) to match the B matrix
     X_eigen = [X_eigen, 1];
     
     % --- 4. PREDICT VELOCITY ---
     % Multiply our compressed feature vector by the trained weights matrix
-    predicted_velocity = X_eigen * B; 
+    predicted_velocity = X_eigen * Bs{trialDir}; 
     
     % --- 5. ESTIMATE CONTINUOUS POSITION ---
     % Position = Previous Position + Predicted Velocity
