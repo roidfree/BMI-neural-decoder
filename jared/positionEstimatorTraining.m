@@ -1,4 +1,4 @@
-function [modelParameters] = positionEstimatorTraining(training_data)
+ function [modelParameters] = positionEstimatorTraining(training_data)
     modelParameters = struct;
     processed_data = training_data;
     trials = size(training_data, 1);
@@ -23,42 +23,51 @@ function [modelParameters] = positionEstimatorTraining(training_data)
     history_bins = 15;  % should be zero to something reasonable, corresponds to history_bins * bin_width lag in time
     bin_width = processed_data(1, 1).bin_width;
     max_iter = floor(571 / bin_width) - history_bins;
-    X = zeros(trials * movements * max_iter, neurons * (history_bins + 1));
-    Y = zeros(trials * movements * max_iter, 2); % X avg velocity in col 1 and Y in 2
-    counter = 1;
-    for t = 1:trials
-        for m = 1:movements
+    X = zeros(movements, trials * max_iter, neurons * (history_bins + 1));
+    Y = zeros(movements, trials * max_iter, 2); % X avg velocity in col 1 and Y in 2
+    for m = 1:movements
+        counter = 1;
+        for t = 1:trials
             for i = 1:max_iter
-                X(counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
-                Y(counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
-                Y(counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
+                X(m, counter, :) = reshape(processed_data(t, m).spikes(:, i:history_bins + i), 1, []);
+                Y(m, counter, 1) = processed_data(t, m).handPos(1, (history_bins + i) * bin_width) - processed_data(t, m).handPos(1, (history_bins + i - 1) * bin_width);
+                Y(m, counter, 2) = processed_data(t, m).handPos(2, (history_bins + i) * bin_width) - processed_data(t, m).handPos(2, (history_bins + i - 1) * bin_width);
                 counter = counter + 1;
             end
         end
     end
 
+    modelParameters.B = cell(movements, 1);
+    modelParameters.mu_X = cell(movements, 1);
+    modelParameters.V_reduced = cell(movements, 1);
+
     % OLS
     % Have a bias input just in case
-    %X = [X, ones(trials * movements * max_iter, 1)];
-    %B = X \ Y;
+    % WON'T HAVE ENOUGH DATA TO TRAIN THE WEIGHTS FOR OLS
+    % for m = 1:movements
+    %     Xmov = [squeeze(X(m, :, :)), ones(trials * max_iter, 1)];
+    %     Ymov = squeeze(Y(m, :, :));
+    %     modelParameters.B{m} = Xmov \ Ymov;
+    % end
 
     % PCR
-    mu_X = mean(X, 1);
-    centred_X = X - mu_X;
-    [U, S, V] = svd(centred_X);
-    PCs = 500;
-    U_reduced = U(:, 1:PCs);
-    S_reduced = S(1:PCs, 1:PCs);
-    V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
-    eigen_X = centred_X * V_reduced;
-    eigen_X = [eigen_X, ones(trials * movements * max_iter, 1)];
-    B = eigen_X \ Y;
-
-
-    % Pass out for testing
-    modelParameters.B = B;
-    modelParameters.mu_X = mu_X;
-    modelParameters.V_reduced = V_reduced;
+    for m = 1:movements
+        Xmov = squeeze(X(m, :, :));
+        Ymov = squeeze(Y(m, :, :));
+        mu_X = mean(Xmov, 1);
+        modelParameters.mu_X{m} = mu_X
+        centred_X = Xmov - mu_X;
+        [U, S, V] = svd(centred_X);
+        PCs = 100;
+        U_reduced = U(:, 1:PCs);
+        S_reduced = S(1:PCs, 1:PCs);
+        V_reduced = V(:, 1:PCs);  % these are eigenvectors of covariance matrix
+        modelParameters.V_reduced{m} = V_reduced;
+        eigen_X = centred_X * V_reduced;
+        eigen_X = [eigen_X, ones(trials * max_iter, 1)];
+        modelParameters.B{m} = eigen_X \ Ymov;
+    end
+    
 end
 
 
