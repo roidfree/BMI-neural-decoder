@@ -8,7 +8,7 @@
 % RMSE = testFunction_for_students_MTb("overfitter_ming")
 % RMSE = testFunction_for_students_MTb("overfitter_ming_population")
 % RMSE = testFunction_for_students_MTb("Test_LDA+K")
-
+% RMSE = testFunction_for_students_MTb("week3_code")
 function RMSE = testFunction_for_students_MTb(teamName)
 
 % Use script directory so addpath/load work regardless of current folder
