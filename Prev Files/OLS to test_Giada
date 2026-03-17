@@ -1,0 +1,69 @@
+function [modelParameters] = positionEstimatorTraining(training_data)
+
+    [trials, movements] = size(training_data);
+    
+
+    kernel_width = 10;
+    window_width = kernel_width * 3;
+    history_ms = 300;     % Total history window
+    sample_step = 5;      % Sample every 5ms
+    start_time = 320;     % Start after history window + buffer
+    
+    % Number of bins per electrode (300ms / 5ms = 60 bins)
+    num_bins = history_ms / sample_step;
+
+    for m = 1:movements
+        X_list = {}; % Using cell arrays 
+        Y_list = {};
+        
+        for t = 1:trials
+            
+            spikes = training_data(t,m).spikes;
+            pos = training_data(t,m).handPos(1:2,:); % [x; y]
+            
+            % 2. Calculate Firing Rates (assumed 1ms resolution output)
+            % Ensure rates_from_spikes returns [N_electrodes x T_ms]
+            rates = rates_from_spikes(spikes, kernel_width, window_width, 1);
+            
+            % 3. Calculate Velocity (Target Y)
+            % diff reduces length by 1, so we pad the end to maintain T
+            vel = [diff(pos, 1, 2), [0; 0]]; 
+            
+            T = size(rates, 2);
+            
+            % 4. Build the History Matrix
+            for tt = start_time:sample_step:T
+                % Extract 300ms of history using 5ms steps
+                % Indices: [tt, tt-5, tt-10, ..., tt-295]
+                hist_idx = tt : -sample_step : (tt - history_ms + sample_step);
+                
+                % Extract neural data for these time points
+                % Resulting snippet is [N_electrodes x 60]
+                neural_snapshot = rates(:, hist_idx);
+                
+                % Flatten snippet into a single row [1 x (N*60)]
+                X_list{end+1} = neural_snapshot(:)';
+                
+                % Store the corresponding velocity [1 x 2]
+                Y_list{end+1} = vel(:, tt)';
+            end
+        end
+        
+        % Convert cell arrays to matrices
+        X = cell2mat(X_list');
+        Y = cell2mat(Y_list');
+        
+        % 5. Add Bias Term 
+        X = [X, ones(size(X, 1), 1)];
+        
+        % 6. Solve OLS: B = (X'X)^-1 * X'Y
+        % MATLAB's \ operator uses QR decomposition for better stability
+        modelParameters.B{m} = X \ Y;
+    end
+
+    % Store metadata for the testing phase
+    modelParameters.kernel_width = kernel_width;
+    modelParameters.window_width = window_width;
+    modelParameters.sample_step = sample_step;
+    modelParameters.history_ms = history_ms;
+end
