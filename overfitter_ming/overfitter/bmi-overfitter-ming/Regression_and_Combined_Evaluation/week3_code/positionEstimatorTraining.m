@@ -26,8 +26,7 @@ function [modelParameters] = positionEstimatorTraining(training_data)
     end
     modelParameters.means = class_means;
 
-    % ---- MEAN TRAJECTORY (most stable baseline) ----
-    % Always provide modelParameters.avgTraj{m} = [mean_x(t); mean_y(t)]
+    % ---- MEAN TRAJECTORY ----
     if ~isfield(modelParameters, "avgTraj")
         avgTraj = cell(movements, 1);
         for m = 1:movements
@@ -48,7 +47,7 @@ function [modelParameters] = positionEstimatorTraining(training_data)
     
             count(count == 0) = 1;
             avgTraj{m} = sumPos ./ repmat(count, 2, 1);
-        end
+        end 
         modelParameters.avgTraj = avgTraj;
     end
 
