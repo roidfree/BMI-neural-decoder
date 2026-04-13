@@ -1,56 +1,48 @@
-% positionEstimatorTraining.m
+function modelParameters = positionEstimatorTraining(trainingData, varargin)
+% Train k-NN direction classifier from 320 ms spike counts.
+%
+% Inputs
+%   trainingData  : (#trials x #dirs) struct array with field .spikes
+%   varargin{1}   : optional k (default 5)
+%
+% Output
+%   modelParameters.X      : normalized training features (N x numNeurons)
+%   modelParameters.y      : direction labels (N x 1)
+%   modelParameters.mu     : feature mean (1 x numNeurons)
+%   modelParameters.sigma  : feature std (1 x numNeurons)
+%   modelParameters.k      : neighbor count
 
-function modelParameters = positionEstimatorTraining(trainingData, k)
-% Trains a k-NN classifier to predict movement direction from spikes.
-%
-% USAGE:
-%   modelParameters = positionEstimatorTraining(trainingData)
-%   modelParameters = positionEstimatorTraining(trainingData, k)
-%
-% INPUT:
-%   trainingData : (#trials x 8) struct array, each with fields .spikes, .handPos
-%   k (optional) : number of neighbors (default 5)
-%
-% OUTPUT:
-%   modelParameters : struct with fields
-%       .X       : N×98  matrix of normalized features
-%       .y       : N×1   vector of labels in 1..8
-%       .mu      : 1×98  feature mean (pre-normalization)
-%       .sigma   : 1×98  feature std  (pre-normalization)
-%       .k       : scalar number of neighbors
-
-    if nargin<2 || isempty(k)
-        k = 5;
+    k = 5;
+    if ~isempty(varargin) && ~isempty(varargin{1})
+        k = varargin{1};
     end
 
-    T_class = 320;  % use first 320 ms for classification
+    classificationHorizon = 320;
     [numTrials, numDirs] = size(trainingData);
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+    numSamples = numTrials * numDirs;
 
-    % Build training set
-    X = zeros(numTrials * numDirs, 98);
-    y = zeros(numTrials * numDirs, 1);
-    idx = 1;
-    for i = 1:numTrials
-        for d = 1:numDirs
-            spk = trainingData(i,d).spikes;       % 98 x T
-            T   = size(spk,2);
-            tEnd = min(T_class, T);
-            feat = sum(spk(:,1:tEnd), 2)';       % 1x98
-            X(idx,:) = feat;
-            y(idx)   = d;
-            idx = idx+1;
+    features = zeros(numSamples, numNeurons);
+    labels = zeros(numSamples, 1);
+
+    sampleIdx = 1;
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            spikes = trainingData(trialIdx, dirIdx).spikes;
+            endIdx = min(classificationHorizon, size(spikes, 2));
+            features(sampleIdx, :) = sum(spikes(:, 1:endIdx), 2)';
+            labels(sampleIdx) = dirIdx;
+            sampleIdx = sampleIdx + 1;
         end
     end
 
-    % Z-score normalization
-    mu    = mean(X,1);
-    sigma = std(X,0,1) + eps;
-    Xn    = (X - mu) ./ sigma;
+    mu = mean(features, 1);
+    sigma = std(features, 0, 1) + eps;
+    normalizedFeatures = (features - mu) ./ sigma;
 
-    % Store model parameters
-    modelParameters.X       = Xn;
-    modelParameters.y       = y;
-    modelParameters.mu      = mu;
-    modelParameters.sigma   = sigma;
-    modelParameters.k       = k;
+    modelParameters.X = normalizedFeatures;
+    modelParameters.y = labels;
+    modelParameters.mu = mu;
+    modelParameters.sigma = sigma;
+    modelParameters.k = k;
 end

@@ -1,34 +1,24 @@
-% positionEstimator_PCA_LDA_K.m
-
-function pred_dir = positionEstimator_PCA_LDA_K(testSample, modelParameters)
-% Predicts direction via PCA→LDA→k-NN.
+function predictedDir = positionEstimator_PCA_LDA_K(testSample, modelParameters)
+% Predict direction using PCA + LDA features and k-NN.
 %
-% Usage:
-%   pred_dir = positionEstimator_PCA_LDA_K(testSample, modelParameters)
+% Inputs
+%   testSample       : struct with field .spikes
+%   modelParameters  : output of positionEstimatorTraining_PCA_LDA_K
 %
-% Inputs:
-%   testSample       : struct with .spikes (98×T)
-%   modelParameters  : output of training above
-%
-% Output:
-%   pred_dir : scalar 1..8
+% Output
+%   predictedDir     : scalar direction label in 1..8
 
-    T_class = 320;
-    spk = testSample.spikes;
-    tEnd = min(T_class, size(spk,2));
-    feat = sum(spk(:,1:tEnd),2)';           % 1×98
+    classificationHorizon = 320;
+    spikes = testSample.spikes;
+    endIdx = min(classificationHorizon, size(spikes, 2));
+    feature = sum(spikes(:, 1:endIdx), 2)';
 
-    % normalize
-    Xn = (feat - modelParameters.mu) ./ modelParameters.sigma;  % 1×98
-    % PCA project
-    x_pca = Xn * modelParameters.V_pca;      % 1×pcaDim
-    % LDA project
-    x_lda = x_pca * modelParameters.W_lda;   % 1×ldaDim
+    normalizedFeature = (feature - modelParameters.mu) ./ modelParameters.sigma;
+    pcaFeature = normalizedFeature * modelParameters.V_pca;
+    ldaFeature = pcaFeature * modelParameters.W_lda;
 
-    % k-NN in LDA space
-    diffsq = (modelParameters.X_proj - x_lda).^2;  % N×ldaDim
-    d2     = sum(diffsq,2);                        % N×1
-    [~,ord] = sort(d2,'ascend');
-    nn      = modelParameters.y(ord(1:modelParameters.k));
-    pred_dir = mode(nn);
+    squaredDistances = sum((modelParameters.X_proj - ldaFeature) .^ 2, 2);
+    [~, sortedIdx] = sort(squaredDistances, "ascend");
+    nearestLabels = modelParameters.y(sortedIdx(1:modelParameters.k));
+    predictedDir = mode(nearestLabels);
 end

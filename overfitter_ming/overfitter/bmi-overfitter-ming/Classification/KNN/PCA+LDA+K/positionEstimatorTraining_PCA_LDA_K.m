@@ -1,86 +1,73 @@
-% positionEstimatorTraining_PCA_LDA_K.m
-
-function modelParameters = positionEstimatorTraining_PCA_LDA_K(trainingData, k, pcaDim, ldaDim)
-% Trains a PCA→LDA→k-NN classifier on 320 ms–summed spike counts.
+function modelParameters = positionEstimatorTraining_PCA_LDA_K(trainingData, varargin)
+% Train PCA + LDA + k-NN direction classifier from 320 ms spike counts.
 %
-% Usage:
-%   modelParameters = positionEstimatorTraining_PCA_LDA_K(trainingData)
-%   modelParameters = positionEstimatorTraining_PCA_LDA_K(trainingData, k, pcaDim, ldaDim)
-%
-% Inputs:
-%   trainingData : (#trials×8) struct array with .spikes (98×T)
-%   k            : # neighbors for k-NN (default 5)
-%   pcaDim       : # PCA components (default 20)
-%   ldaDim       : # LDA dimensions (≤7, default 6)
-%
-% Outputs modelParameters with fields:
-%   .mu, .sigma        – 1×98 for z-scoring
-%   .V_pca             – 98×pcaDim PCA projection
-%   .W_lda             – pcaDim×ldaDim LDA projection
-%   .X_proj            – N×ldaDim final features
-%   .y                 – N×1 labels
-%   .k                 – scalar
+% Inputs
+%   trainingData  : (#trials x #dirs) struct array with field .spikes
+%   varargin{1}   : optional k (default 5)
+%   varargin{2}   : optional pcaDim (default 20)
+%   varargin{3}   : optional ldaDim (default min(pcaDim,7))
 
-    if nargin<2||isempty(k),     k=5;    end
-    if nargin<3||isempty(pcaDim), pcaDim=20; end
-    if nargin<4||isempty(ldaDim), ldaDim=min(pcaDim,7); end
+    k = 5;
+    pcaDim = 20;
+    ldaDim = 7;
+    if numel(varargin) >= 1 && ~isempty(varargin{1}), k = varargin{1}; end
+    if numel(varargin) >= 2 && ~isempty(varargin{2}), pcaDim = varargin{2}; end
+    if numel(varargin) >= 3 && ~isempty(varargin{3}), ldaDim = varargin{3}; end
+    ldaDim = min(ldaDim, pcaDim);
 
-    T_class = 320;
+    classificationHorizon = 320;
     [numTrials, numDirs] = size(trainingData);
-    N = numTrials * numDirs;
-    D = 98;
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+    numSamples = numTrials * numDirs;
 
-    % 1) Build raw features X and labels y
-    X = zeros(N,D);
-    y = zeros(N,1);
-    idx = 1;
-    for i=1:numTrials
-      for d=1:numDirs
-        spk = trainingData(i,d).spikes;      % 98×T
-        tEnd = min(T_class, size(spk,2));
-        X(idx,:) = sum(spk(:,1:tEnd),2)';    % 1×98
-        y(idx)   = d;
-        idx = idx+1;
-      end
+    features = zeros(numSamples, numNeurons);
+    labels = zeros(numSamples, 1);
+    sampleIdx = 1;
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            spikes = trainingData(trialIdx, dirIdx).spikes;
+            endIdx = min(classificationHorizon, size(spikes, 2));
+            features(sampleIdx, :) = sum(spikes(:, 1:endIdx), 2)';
+            labels(sampleIdx) = dirIdx;
+            sampleIdx = sampleIdx + 1;
+        end
     end
 
-    % 2) Z-score normalization
-    mu    = mean(X,1);
-    sigma = std(X,0,1) + eps;
-    Xn    = (X - mu) ./ sigma;             % N×98
+    mu = mean(features, 1);
+    sigma = std(features, 0, 1) + eps;
+    normalizedFeatures = (features - mu) ./ sigma;
 
-    % 3) PCA via SVD: keep top pcaDim PCs
-    %    Xn = U*S*V';  so columns of V are PCs
-    [~,~,V] = svd(Xn,'econ');
-    V_pca = V(:,1:pcaDim);                 % 98×pcaDim
-    X_pca = Xn * V_pca;                    % N×pcaDim
+    [~, ~, v] = svd(normalizedFeatures, "econ");
+    pcaDim = min(pcaDim, size(v, 2));
+    vPca = v(:, 1:pcaDim);
+    pcaFeatures = normalizedFeatures * vPca;
 
-    % 4) LDA on X_pca to get W_lda (pcaDim×ldaDim)
-    classes = unique(y);
-    C = numel(classes);
-    meanAll = mean(X_pca,1)';              % pcaDim×1
-    Sw = zeros(pcaDim,pcaDim);
-    Sb = zeros(pcaDim,pcaDim);
-    for c=classes'
-      Xc = X_pca(y==c,:);
-      mc = mean(Xc,1)';
-      Sw = Sw + (Xc - mc.').'*(Xc - mc.');
-      Nc = size(Xc,1);
-      diff = mc - meanAll;
-      Sb = Sb + Nc*(diff*diff');
+    classList = unique(labels);
+    globalMean = mean(pcaFeatures, 1)';
+    sw = zeros(pcaDim, pcaDim);
+    sb = zeros(pcaDim, pcaDim);
+    for classIdx = classList'
+        classData = pcaFeatures(labels == classIdx, :);
+        classMean = mean(classData, 1)';
+        centeredClass = classData - classMean';
+        sw = sw + centeredClass' * centeredClass;
+        classCount = size(classData, 1);
+        meanDiff = classMean - globalMean;
+        sb = sb + classCount * (meanDiff * meanDiff');
     end
-    [Vlda,~] = eig(Sb, Sw);
-    % rank by eigenvalue ratio
-    [~,ord] = sort(diag(Vlda'*Sb*Vlda)./sum((Vlda'*Sw*Vlda),2),'descend');
-    W_lda = Vlda(:,ord(1:ldaDim));         % pcaDim×ldaDim
-    X_lda = X_pca * W_lda;                 % N×ldaDim
 
-    % 5) Store model
-    modelParameters.mu     = mu;
-    modelParameters.sigma  = sigma;
-    modelParameters.V_pca  = V_pca;
-    modelParameters.W_lda  = W_lda;
-    modelParameters.X_proj = X_lda;
-    modelParameters.y      = y;
-    modelParameters.k      = k;
+    [eigVec, eigVal] = eig(sb, sw);
+    eigScore = real(diag(eigVal));
+    [~, order] = sort(eigScore, "descend");
+    ldaDim = min(ldaDim, numel(order));
+    wLda = real(eigVec(:, order(1:ldaDim)));
+    projectedFeatures = pcaFeatures * wLda;
+
+    modelParameters.mu = mu;
+    modelParameters.sigma = sigma;
+    modelParameters.V_pca = vPca;
+    modelParameters.W_lda = wLda;
+    modelParameters.X_proj = projectedFeatures;
+    modelParameters.y = labels;
+    modelParameters.k = k;
 end

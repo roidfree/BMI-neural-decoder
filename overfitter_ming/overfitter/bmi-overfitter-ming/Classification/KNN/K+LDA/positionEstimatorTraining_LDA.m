@@ -1,80 +1,71 @@
-% positionEstimatorTraining_LDA.m
-
-function modelParameters = positionEstimatorTraining_LDA(trainingData, k, ldaDim)
-% Trains an LDA projection followed by k-NN on spike-count features.
+function modelParameters = positionEstimatorTraining_LDA(trainingData, varargin)
+% Train LDA + k-NN direction classifier from 320 ms spike counts.
 %
-%   modelParameters = positionEstimatorTraining_LDA(trainingData, k, ldaDim)
+% Inputs
+%   trainingData  : (#trials x #dirs) struct array with field .spikes
+%   varargin{1}   : optional k (default 5)
+%   varargin{2}   : optional ldaDim (default 5)
 %
-% Inputs:
-%   trainingData : (#trials×8) struct array with field .spikes (98×T)
-%   k            : number of neighbors
-%   ldaDim       : number of LDA components (≤7)
-%
-% Outputs modelParameters with fields:
-%   .mu     (1×98), .sigma (1×98)   — for z-scoring
-%   .W       (98×ldaDim)            — LDA projection
-%   .X_lda   (N×ldaDim)             — projected training features
-%   .y       (N×1)                  — labels 1..8
-%   .k       scalar
+% Output
+%   modelParameters.mu      : feature mean before z-score
+%   modelParameters.sigma   : feature std before z-score
+%   modelParameters.W       : LDA projection matrix
+%   modelParameters.X_lda   : projected training features
+%   modelParameters.y       : labels
+%   modelParameters.k       : neighbor count
 
-    if nargin<2||isempty(k),     k = 5; end
-    if nargin<3||isempty(ldaDim), ldaDim = 5; end
+    k = 5;
+    ldaDim = 5;
+    if numel(varargin) >= 1 && ~isempty(varargin{1}), k = varargin{1}; end
+    if numel(varargin) >= 2 && ~isempty(varargin{2}), ldaDim = varargin{2}; end
 
-    T_class = 320;
+    classificationHorizon = 320;
     [numTrials, numDirs] = size(trainingData);
-    N = numTrials * numDirs;
-    D = 98;
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+    numSamples = numTrials * numDirs;
 
-    % 1) Build raw feature matrix and labels
-    X = zeros(N,D);
-    y = zeros(N,1);
-    idx = 1;
-    for i=1:numTrials
-      for d=1:numDirs
-        spk = trainingData(i,d).spikes;         % 98×T
-        tEnd = min(T_class, size(spk,2));
-        X(idx,:) = sum(spk(:,1:tEnd),2)';       % 1×98
-        y(idx)   = d;
-        idx = idx+1;
-      end
+    features = zeros(numSamples, numNeurons);
+    labels = zeros(numSamples, 1);
+    sampleIdx = 1;
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            spikes = trainingData(trialIdx, dirIdx).spikes;
+            endIdx = min(classificationHorizon, size(spikes, 2));
+            features(sampleIdx, :) = sum(spikes(:, 1:endIdx), 2)';
+            labels(sampleIdx) = dirIdx;
+            sampleIdx = sampleIdx + 1;
+        end
     end
 
-    % 2) Z-score
-    mu    = mean(X,1);
-    sigma = std(X,0,1) + eps;
-    Xn    = (X - mu) ./ sigma;
+    mu = mean(features, 1);
+    sigma = std(features, 0, 1) + eps;
+    normalizedFeatures = (features - mu) ./ sigma;
 
-    % 3) Compute LDA projection
-    classes = unique(y);
-    C = numel(classes);
-    overallMean = mean(Xn,1)';       % D×1
-
-    % Within‐class scatter
-    Sw = zeros(D,D);
-    Sb = zeros(D,D);
-    for c=classes'
-      Xc = Xn(y==c,:);
-      mc = mean(Xc,1)';              % D×1
-      Sw = Sw + (Xc - mc').'*(Xc - mc');
-      Nc = size(Xc,1);
-      diff = mc - overallMean;
-      Sb = Sb + Nc * (diff * diff');
+    classList = unique(labels);
+    overallMean = mean(normalizedFeatures, 1)';
+    sw = zeros(numNeurons, numNeurons);
+    sb = zeros(numNeurons, numNeurons);
+    for classIdx = classList'
+        classData = normalizedFeatures(labels == classIdx, :);
+        classMean = mean(classData, 1)';
+        centeredClass = classData - classMean';
+        sw = sw + centeredClass' * centeredClass;
+        classCount = size(classData, 1);
+        meanDiff = classMean - overallMean;
+        sb = sb + classCount * (meanDiff * meanDiff');
     end
 
-    % Solve generalized eigenproblem Sb v = λ Sw v
-    [V,~] = eig(Sb, Sw);
-    % sort by descending eigenvalue
-    [~,ord] = sort(diag(V'*Sb*V)./sum((V'*Sw*V),2),'descend');
-    W = V(:,ord(1:ldaDim));         % D×ldaDim
+    [eigVec, eigVal] = eig(sb, sw);
+    eigScore = real(diag(eigVal));
+    [~, order] = sort(eigScore, "descend");
+    ldaDim = min(ldaDim, numel(order));
+    w = real(eigVec(:, order(1:ldaDim)));
+    projectedFeatures = normalizedFeatures * w;
 
-    % 4) Project training data
-    X_lda = Xn * W;                 % N×ldaDim
-
-    % 5) Store
-    modelParameters.mu    = mu;
+    modelParameters.mu = mu;
     modelParameters.sigma = sigma;
-    modelParameters.W     = W;
-    modelParameters.X_lda = X_lda;
-    modelParameters.y     = y;
-    modelParameters.k     = k;
+    modelParameters.W = w;
+    modelParameters.X_lda = projectedFeatures;
+    modelParameters.y = labels;
+    modelParameters.k = k;
 end
