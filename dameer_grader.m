@@ -41,7 +41,7 @@ function opts = default_benchmark_options(repoRoot)
     opts.taskScoreEnabled = false;
 
     % Screening defaults.
-    opts.classifierMethods = {'cosine_jared', 'nbc_ming', 'knn_ming'};
+    opts.classifierMethods = {'cosine_jared', 'nbc_ming', 'knn_ming', 'lda_jared'};
     opts.classifierKGrid = [1, 5, 11, 21];
     opts.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
     opts.pooledPCRGrid = [50, 100, 200, 300, 400, 500];
@@ -152,6 +152,7 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
     end
 
     rawRows = repmat(empty_result_row(), 0, 1);
+    timeResolvedRows = repmat(empty_timeresolved_row(), 0, 1);
     for runIdx = 1:numel(runSpecs)
         runSpec = runSpecs(runIdx);
         if opts.verbose
@@ -167,7 +168,7 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
 
             switch runSpec.executor
                 case 'classifier_local'
-                    metrics = evaluate_local_classifier_fold(runSpec, trainData, testData);
+                    metrics = evaluate_local_classifier_fold(runSpec, trainData, testData, evalConfig);
                 case 'continuous_local'
                     metrics = evaluate_local_continuous_fold(runSpec, trainData, testData, evalConfig);
                 case 'generic_position_estimator'
@@ -178,6 +179,14 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
 
             rawRows(end + 1) = build_result_row(runSpec, foldIdx, metrics); %#ok<AGROW>
 
+            if isfield(metrics, 'timesByT') && ~isempty(metrics.timesByT)
+                for tIdx = 1:numel(metrics.timesByT)
+                    timeResolvedRows(end + 1) = build_timeresolved_row( ...
+                        runSpec, foldIdx, metrics.timesByT(tIdx), ...
+                        metrics.accByT(tIdx), metrics.countsByT(tIdx)); %#ok<AGROW>
+                end
+            end
+
             if opts.verbose
                 fprintf('    Fold %d -> %s\n', foldIdx, format_metric_string(runSpec.task, metrics));
             end
@@ -185,6 +194,11 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
     end
 
     rawTable = struct2table(rawRows);
+    if isempty(timeResolvedRows)
+        timeResolvedTable = empty_timeresolved_table();
+    else
+        timeResolvedTable = struct2table(timeResolvedRows);
+    end
     [foldTable, foldStruct] = fold_manifest_table(folds);
 
     classifierRaw = rawTable(strcmp(rawTable.task, 'classifier'), :);
@@ -194,11 +208,11 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
     continuousMask = ismember(rawTable.task, {'regressor_pooled', 'pipeline', 'kalman_exploratory'});
     continuousRaw = rawTable(continuousMask, :);
     continuousSummary = summarize_results(continuousRaw);
-    continuousBest = select_best_configs(continuousSummary, 'rmse', 'ascend');
+    continuousBest = select_best_configs(continuousSummary, 'taskScore', 'ascend');
     if isempty(continuousBest)
         optimizedPerformance = continuousBest;
     else
-        optimizedPerformance = sortrows(continuousBest, {'meanRMSE', 'method'});
+        optimizedPerformance = sortrows(continuousBest, {'meanTaskScore', 'meanRMSE', 'method'});
     end
 
     optimizedParameters = build_optimized_parameter_table(classifierBest, continuousBest);
@@ -206,12 +220,12 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
     paths = struct();
     if opts.saveOutputs || opts.plotFigures
         paths = write_benchmark_outputs( ...
-            outputDir, evalConfig, runSpecsTable, foldTable, rawTable, classifierSummary, ...
-            classifierBest, continuousSummary, optimizedPerformance, optimizedParameters);
+            outputDir, opts, evalConfig, runSpecsTable, foldTable, rawTable, timeResolvedTable, ...
+            classifierSummary, classifierBest, continuousSummary, optimizedPerformance, optimizedParameters);
 
         if opts.plotFigures
             paths.figureFiles = generate_benchmark_figures( ...
-                outputDir, classifierSummary, continuousSummary, optimizedPerformance);
+                outputDir, classifierSummary, continuousSummary, optimizedPerformance, timeResolvedTable);
         else
             paths.figureFiles = {};
         end
@@ -230,6 +244,7 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
         'classifierRaw', classifierRaw, ...
         'classifierSummary', classifierSummary, ...
         'classifierBest', classifierBest, ...
+        'classifierTimeResolved', timeResolvedTable, ...
         'continuousRaw', continuousRaw, ...
         'continuousSummary', continuousSummary, ...
         'optimizedPerformance', optimizedPerformance, ...
@@ -337,6 +352,21 @@ function runSpecs = build_run_specs(opts, repoRoot)
             'notes', 'Code-grounded from Classifier_Ming/NBC.');
     end
 
+    if ismember('lda_jared', opts.classifierMethods)
+        runSpecs(end + 1) = make_run_spec( ...
+            'task', 'classifier', ...
+            'family', 'classifier_screening', ...
+            'method', 'lda_jared', ...
+            'executor', 'classifier_local', ...
+            'localKind', 'lda_jared', ...
+            'configId', 1, ...
+            'configLabel', 'default', ...
+            'classifier', 'lda_shrinkage', ...
+            'regressor', 'none', ...
+            'preprocess', 'early_cumulative_counts_anscombe', ...
+            'notes', 'Pooled-covariance LDA on Anscombe(cumulative counts); matches the exemplar report classifier.');
+    end
+
     if ismember('knn_ming', opts.classifierMethods)
         for idx = 1:numel(opts.classifierKGrid)
             kVal = opts.classifierKGrid(idx);
@@ -374,6 +404,8 @@ function runSpecs = build_run_specs(opts, repoRoot)
                 'nPC', nPC, ...
                 'lambda', 0, ...
                 'historyBins', opts.pooledHistoryBins, ...
+                'binWidth', opts.pooledBinWidth, ...
+                'transform', opts.pooledTransform, ...
                 'notes', 'Shared pooled PCR screening baseline derived from the original dameer_grader.');
         end
     end
@@ -398,6 +430,8 @@ function runSpecs = build_run_specs(opts, repoRoot)
                     'nPC', nPC, ...
                     'lambda', lambdaVal, ...
                     'historyBins', opts.pooledHistoryBins, ...
+                    'binWidth', opts.pooledBinWidth, ...
+                    'transform', opts.pooledTransform, ...
                     'notes', 'Shared pooled ridge-PCR screening baseline using the dameer_grader feature pipeline.');
                 configId = configId + 1;
             end
@@ -480,6 +514,8 @@ function spec = empty_run_spec()
         'nPC', NaN, ...
         'lambda', NaN, ...
         'historyBins', NaN, ...
+        'binWidth', NaN, ...
+        'transform', '', ...
         'bufferShort', NaN, ...
         'bufferLong', NaN, ...
         'smoothWin', NaN, ...
@@ -498,42 +534,71 @@ function spec = make_run_spec(varargin)
     end
 end
 
-function metrics = evaluate_local_classifier_fold(runSpec, trainData, testData)
-    trainTimer = tic;
-    switch runSpec.localKind
-        case 'cosine_jared'
-            model = train_classifier_cosine_jared(trainData);
-        case 'nbc_ming'
-            model = train_classifier_nbc_ming(trainData);
-        case 'knn_ming'
-            model = train_classifier_knn_ming(trainData, runSpec.k);
-        otherwise
-            error('Unknown local classifier kind: %s', runSpec.localKind);
-    end
-    trainTime = toc(trainTimer);
+function metrics = evaluate_local_classifier_fold(runSpec, trainData, testData, evalConfig)
+    endHorizon = 560;
+    timesByT = evalConfig.startMs:evalConfig.stepMs:endHorizon;
+    numT = numel(timesByT);
+    accByT = zeros(1, numT);
+    countsByT = zeros(1, numT);
+    trainTime = 0;
+    testTime = 0;
 
-    testTimer = tic;
-    [accuracy, numSamples] = score_classifier_model(runSpec.localKind, model, testData);
-    testTime = toc(testTimer);
+    for idx = 1:numT
+        horizon = timesByT(idx);
+        trainTimer = tic;
+        switch runSpec.localKind
+            case 'cosine_jared'
+                model = train_classifier_cosine_jared(trainData, horizon);
+            case 'nbc_ming'
+                model = train_classifier_nbc_ming(trainData, horizon);
+            case 'knn_ming'
+                model = train_classifier_knn_ming(trainData, runSpec.k, horizon);
+            case 'lda_jared'
+                model = train_classifier_lda_jared(trainData, horizon);
+            otherwise
+                error('Unknown local classifier kind: %s', runSpec.localKind);
+        end
+        trainTime = trainTime + toc(trainTimer);
+
+        testTimer = tic;
+        [accByT(idx), countsByT(idx)] = score_classifier_model(runSpec.localKind, model, testData);
+        testTime = testTime + toc(testTimer);
+    end
+
+    finalAccuracy = accByT(end);
+    totalPredictions = sum(countsByT);
 
     metrics = struct();
     metrics.rmse = NaN;
-    metrics.accuracy = accuracy;
+    metrics.accuracy = finalAccuracy;
     metrics.trainTimeSec = trainTime;
     metrics.testTimeSec = testTime;
-    metrics.timePerPredictionMs = 1000 * testTime / max(numSamples, 1);
-    metrics.numPredictions = numSamples;
+    metrics.timePerPredictionMs = 1000 * testTime / max(totalPredictions, 1);
+    metrics.numPredictions = totalPredictions;
     metrics.taskScore = NaN;
+    metrics.timesByT = timesByT;
+    metrics.accByT = accByT;
+    metrics.countsByT = countsByT;
 end
 
 function metrics = evaluate_local_continuous_fold(runSpec, trainData, testData, evalConfig)
     trainTimer = tic;
+    if isnan(runSpec.binWidth)
+        binWidth = 20;
+    else
+        binWidth = runSpec.binWidth;
+    end
+    if isempty(runSpec.transform)
+        transformName = 'anscombe';
+    else
+        transformName = runSpec.transform;
+    end
     cfg = struct( ...
         'nPC', runSpec.nPC, ...
         'lambda', runSpec.lambda, ...
         'historyBins', runSpec.historyBins, ...
-        'binWidth', 20, ...
-        'transform', 'anscombe');
+        'binWidth', binWidth, ...
+        'transform', transformName);
     model = train_local_pooled_regressor(trainData, cfg);
     trainTime = toc(trainTimer);
 
@@ -548,7 +613,7 @@ function metrics = evaluate_local_continuous_fold(runSpec, trainData, testData, 
     metrics.testTimeSec = testTime;
     metrics.timePerPredictionMs = 1000 * testTime / max(numPredictions, 1);
     metrics.numPredictions = numPredictions;
-    metrics.taskScore = NaN;
+    metrics.taskScore = 0.9 * rmse + 0.1 * testTime;
 end
 
 function metrics = evaluate_generic_position_estimator_fold(runSpec, trainData, testData, evalConfig)
@@ -576,7 +641,7 @@ function metrics = evaluate_generic_position_estimator_fold(runSpec, trainData, 
     metrics.testTimeSec = testTime;
     metrics.timePerPredictionMs = 1000 * testTime / max(numPredictions, 1);
     metrics.numPredictions = numPredictions;
-    metrics.taskScore = NaN;
+    metrics.taskScore = 0.9 * rmse + 0.1 * testTime;
 end
 
 function restore_method_path(previousPath)
@@ -598,6 +663,8 @@ function [accuracy, numSamples] = score_classifier_model(localKind, model, testD
                     predDir = predict_classifier_nbc_ming(sample, model);
                 case 'knn_ming'
                     predDir = predict_classifier_knn_ming(sample, model);
+                case 'lda_jared'
+                    predDir = predict_classifier_lda_jared(sample, model);
                 otherwise
                     error('Unknown local classifier kind: %s', localKind);
             end
@@ -609,11 +676,13 @@ function [accuracy, numSamples] = score_classifier_model(localKind, model, testD
     accuracy = 100 * correct / max(numSamples, 1);
 end
 
-function model = train_classifier_cosine_jared(trainingData)
+function model = train_classifier_cosine_jared(trainingData, horizon)
+    if nargin < 2 || isempty(horizon)
+        horizon = 320;
+    end
     [numTrials, numDirs] = size(trainingData);
     numNeurons = size(trainingData(1, 1).spikes, 1);
     means = zeros(numDirs, numNeurons);
-    horizon = 320;
 
     for dirIdx = 1:numDirs
         features = zeros(numTrials, numNeurons);
@@ -643,8 +712,10 @@ function predDir = predict_classifier_cosine_jared(testSample, model)
     [~, predDir] = max(cosineScores);
 end
 
-function model = train_classifier_nbc_ming(trainingData)
-    horizon = 320;
+function model = train_classifier_nbc_ming(trainingData, horizon)
+    if nargin < 2 || isempty(horizon)
+        horizon = 320;
+    end
     [numTrials, numDirs] = size(trainingData);
     numNeurons = size(trainingData(1, 1).spikes, 1);
     numSamples = numTrials * numDirs;
@@ -655,7 +726,8 @@ function model = train_classifier_nbc_ming(trainingData)
     for trialIdx = 1:numTrials
         for dirIdx = 1:numDirs
             spikes = trainingData(trialIdx, dirIdx).spikes;
-            features(rowIdx, :) = sum(spikes(:, 1:horizon), 2)';
+            endIdx = min(horizon, size(spikes, 2));
+            features(rowIdx, :) = sum(spikes(:, 1:endIdx), 2)';
             labels(rowIdx) = dirIdx;
             rowIdx = rowIdx + 1;
         end
@@ -688,7 +760,8 @@ function model = train_classifier_nbc_ming(trainingData)
 end
 
 function predDir = predict_classifier_nbc_ming(testSample, model)
-    feature = sum(testSample.spikes(:, 1:model.T_class), 2)';
+    endIdx = min(model.T_class, size(testSample.spikes, 2));
+    feature = sum(testSample.spikes(:, 1:endIdx), 2)';
     normalizedFeature = (feature - model.mu_class) ./ model.sigma_class;
     clf = model.classifier;
     numClasses = numel(clf.classes);
@@ -704,8 +777,10 @@ function predDir = predict_classifier_nbc_ming(testSample, model)
     predDir = clf.classes(bestIdx);
 end
 
-function model = train_classifier_knn_ming(trainingData, kVal)
-    horizon = 320;
+function model = train_classifier_knn_ming(trainingData, kVal, horizon)
+    if nargin < 3 || isempty(horizon)
+        horizon = 320;
+    end
     [numTrials, numDirs] = size(trainingData);
     numNeurons = size(trainingData(1, 1).spikes, 1);
     numSamples = numTrials * numDirs;
@@ -716,7 +791,8 @@ function model = train_classifier_knn_ming(trainingData, kVal)
     for trialIdx = 1:numTrials
         for dirIdx = 1:numDirs
             spikes = trainingData(trialIdx, dirIdx).spikes;
-            features(rowIdx, :) = sum(spikes(:, 1:horizon), 2)';
+            endIdx = min(horizon, size(spikes, 2));
+            features(rowIdx, :) = sum(spikes(:, 1:endIdx), 2)';
             labels(rowIdx) = dirIdx;
             rowIdx = rowIdx + 1;
         end
@@ -744,6 +820,70 @@ function predDir = predict_classifier_knn_ming(testSample, model)
     [~, sortedIdx] = sort(squaredDistances, 'ascend');
     nearestLabels = model.y(sortedIdx(1:model.k));
     predDir = mode(nearestLabels);
+end
+
+function model = train_classifier_lda_jared(trainingData, horizon)
+    if nargin < 2 || isempty(horizon)
+        horizon = 320;
+    end
+    [numTrials, numDirs] = size(trainingData);
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+
+    features = zeros(numTrials * numDirs, numNeurons);
+    labels = zeros(numTrials * numDirs, 1);
+    rowIdx = 1;
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            spikes = trainingData(trialIdx, dirIdx).spikes;
+            endIdx = min(horizon, size(spikes, 2));
+            features(rowIdx, :) = sum(spikes(:, 1:endIdx), 2)';
+            labels(rowIdx) = dirIdx;
+            rowIdx = rowIdx + 1;
+        end
+    end
+
+    % Anscombe transform keeps variance ~constant across neurons (report §II-B).
+    features = 2 * sqrt(features + 3 / 8);
+
+    classMeans = zeros(numDirs, numNeurons);
+    priors = zeros(numDirs, 1);
+    pooledCov = zeros(numNeurons, numNeurons);
+    total = size(features, 1);
+
+    for dirIdx = 1:numDirs
+        classMask = labels == dirIdx;
+        Xc = features(classMask, :);
+        classMeans(dirIdx, :) = mean(Xc, 1);
+        priors(dirIdx) = size(Xc, 1) / total;
+        centered = Xc - classMeans(dirIdx, :);
+        pooledCov = pooledCov + centered' * centered;
+    end
+
+    pooledCov = pooledCov / max(total - numDirs, 1);
+    % Shrinkage toward a diagonal target keeps the covariance invertible when
+    % numNeurons is close to the per-class sample count.
+    shrinkage = 1e-3;
+    diagTarget = diag(diag(pooledCov));
+    pooledCov = (1 - shrinkage) * pooledCov + shrinkage * diagTarget;
+    regularizer = 1e-6 * mean(diag(pooledCov)) * eye(numNeurons);
+    Sigma = pooledCov + regularizer;
+
+    W = (Sigma \ classMeans')';
+    b = -0.5 * sum(W .* classMeans, 2) + log(priors + eps);
+
+    model = struct( ...
+        'W', W, ...
+        'b', b, ...
+        'horizon', horizon);
+end
+
+function predDir = predict_classifier_lda_jared(testSample, model)
+    spikes = testSample.spikes;
+    endIdx = min(model.horizon, size(spikes, 2));
+    feature = sum(spikes(:, 1:endIdx), 2)';
+    feature = 2 * sqrt(feature + 3 / 8);
+    scores = model.W * feature' + model.b;
+    [~, predDir] = max(scores);
 end
 
 function model = train_local_pooled_regressor(trainingData, cfg)
@@ -1015,6 +1155,36 @@ function row = build_result_row(runSpec, foldIdx, metrics)
     row.notes = runSpec.notes;
 end
 
+function row = empty_timeresolved_row()
+    row = struct( ...
+        'task', '', ...
+        'method', '', ...
+        'configId', NaN, ...
+        'configLabel', '', ...
+        'k', NaN, ...
+        'fold', NaN, ...
+        't', NaN, ...
+        'accuracy', NaN, ...
+        'numPredictions', NaN);
+end
+
+function row = build_timeresolved_row(runSpec, foldIdx, t, accuracy, numPredictions)
+    row = empty_timeresolved_row();
+    row.task = runSpec.task;
+    row.method = runSpec.method;
+    row.configId = runSpec.configId;
+    row.configLabel = runSpec.configLabel;
+    row.k = runSpec.k;
+    row.fold = foldIdx;
+    row.t = t;
+    row.accuracy = accuracy;
+    row.numPredictions = numPredictions;
+end
+
+function tbl = empty_timeresolved_table()
+    tbl = struct2table(repmat(empty_timeresolved_row(), 0, 1));
+end
+
 function metricString = format_metric_string(taskName, metrics)
     switch taskName
         case 'classifier'
@@ -1065,6 +1235,7 @@ function summaryTable = summarize_results(rawTable)
         trainVals = subset.trainTimeSec(~isnan(subset.trainTimeSec));
         testVals = subset.testTimeSec(~isnan(subset.testTimeSec));
         perPredVals = subset.timePerPredictionMs(~isnan(subset.timePerPredictionMs));
+        taskVals = subset.taskScore(~isnan(subset.taskScore));
 
         if isempty(rmseVals)
             summaryRows(idx).meanRMSE = NaN;
@@ -1088,6 +1259,13 @@ function summaryTable = summarize_results(rawTable)
         summaryRows(idx).stdTestTimeSec = std(testVals);
         summaryRows(idx).meanTimePerPredictionMs = mean(perPredVals);
         summaryRows(idx).stdTimePerPredictionMs = std(perPredVals);
+        if isempty(taskVals)
+            summaryRows(idx).meanTaskScore = NaN;
+            summaryRows(idx).stdTaskScore = NaN;
+        else
+            summaryRows(idx).meanTaskScore = mean(taskVals);
+            summaryRows(idx).stdTaskScore = std(taskVals);
+        end
     end
 
     summaryTable = struct2table(summaryRows);
@@ -1128,6 +1306,8 @@ function row = empty_summary_row()
         'stdTestTimeSec', NaN, ...
         'meanTimePerPredictionMs', NaN, ...
         'stdTimePerPredictionMs', NaN, ...
+        'meanTaskScore', NaN, ...
+        'stdTaskScore', NaN, ...
         'numFolds', NaN, ...
         'notes', '');
 end
@@ -1151,6 +1331,8 @@ function bestTable = select_best_configs(summaryTable, metricName, direction)
                 metricVals = subset.meanAccuracy;
             case 'rmse'
                 metricVals = subset.meanRMSE;
+            case 'taskScore'
+                metricVals = subset.meanTaskScore;
             otherwise
                 error('Unsupported metric for best-config selection: %s', metricName);
         end
@@ -1180,12 +1362,12 @@ function parameterTable = build_optimized_parameter_table(classifierBest, contin
     parameterTable = merged(:, keepVars);
 end
 
-function paths = write_benchmark_outputs(outputDir, evalConfig, runSpecsTable, foldTable, rawTable, classifierSummary, classifierBest, continuousSummary, optimizedPerformance, optimizedParameters)
+function paths = write_benchmark_outputs(outputDir, opts, evalConfig, runSpecsTable, foldTable, rawTable, timeResolvedTable, classifierSummary, classifierBest, continuousSummary, optimizedPerformance, optimizedParameters)
     paths = struct();
     paths.outputDir = outputDir;
 
     paths.evalConfigMat = fullfile(outputDir, 'eval_config.mat');
-    save(paths.evalConfigMat, 'evalConfig');
+    save(paths.evalConfigMat, 'evalConfig', 'opts', 'runSpecsTable');
 
     paths.benchmarkPlanCsv = fullfile(outputDir, 'benchmark_plan.csv');
     writetable(runSpecsTable, paths.benchmarkPlanCsv);
@@ -1205,6 +1387,9 @@ function paths = write_benchmark_outputs(outputDir, evalConfig, runSpecsTable, f
     paths.classifierBestCsv = fullfile(outputDir, 'classifier_best.csv');
     writetable(classifierBest, paths.classifierBestCsv);
 
+    paths.classifierTimeResolvedCsv = fullfile(outputDir, 'classifier_timeresolved.csv');
+    writetable(timeResolvedTable, paths.classifierTimeResolvedCsv);
+
     paths.continuousSummaryCsv = fullfile(outputDir, 'continuous_summary.csv');
     writetable(continuousSummary, paths.continuousSummaryCsv);
 
@@ -1215,17 +1400,22 @@ function paths = write_benchmark_outputs(outputDir, evalConfig, runSpecsTable, f
     writetable(optimizedParameters, paths.optimizedParametersCsv);
 
     paths.bundleMat = fullfile(outputDir, 'benchmark_bundle.mat');
-    save(paths.bundleMat, 'runSpecsTable', 'foldTable', 'rawTable', ...
-        'classifierSummary', 'classifierBest', 'continuousSummary', ...
-        'optimizedPerformance', 'optimizedParameters');
+    save(paths.bundleMat, 'opts', 'runSpecsTable', 'foldTable', 'rawTable', ...
+        'timeResolvedTable', 'classifierSummary', 'classifierBest', ...
+        'continuousSummary', 'optimizedPerformance', 'optimizedParameters');
 end
 
-function figureFiles = generate_benchmark_figures(outputDir, classifierSummary, continuousSummary, optimizedPerformance)
+function figureFiles = generate_benchmark_figures(outputDir, classifierSummary, continuousSummary, optimizedPerformance, timeResolvedTable)
     figureFiles = {};
 
     classifierFigure = plot_classifier_accuracy_curve(outputDir, classifierSummary);
     if ~isempty(classifierFigure)
         figureFiles{end + 1} = classifierFigure; %#ok<AGROW>
+    end
+
+    timeFigure = plot_classifier_accuracy_vs_time(outputDir, timeResolvedTable);
+    if ~isempty(timeFigure)
+        figureFiles{end + 1} = timeFigure;
     end
 
     hyperFiles = plot_rmse_hyperparameter_curves(outputDir, continuousSummary);
@@ -1241,6 +1431,11 @@ function figureFiles = generate_benchmark_figures(outputDir, classifierSummary, 
     runtimeFigure = plot_runtime_scatter(outputDir, optimizedPerformance);
     if ~isempty(runtimeFigure)
         figureFiles{end + 1} = runtimeFigure; %#ok<AGROW>
+    end
+
+    taskScoreFigure = plot_taskscore_bar(outputDir, optimizedPerformance);
+    if ~isempty(taskScoreFigure)
+        figureFiles{end + 1} = taskScoreFigure;
     end
 end
 
@@ -1385,4 +1580,95 @@ end
 
 function label = pretty_method_name(methodName)
     label = strrep(methodName, '_', ' ');
+end
+
+function figureFile = plot_classifier_accuracy_vs_time(outputDir, timeResolvedTable)
+    figureFile = '';
+    if isempty(timeResolvedTable) || height(timeResolvedTable) == 0
+        return;
+    end
+
+    methods = unique(timeResolvedTable.method);
+    if isempty(methods)
+        return;
+    end
+
+    fig = figure('Visible', 'off');
+    hold on;
+    grid on;
+
+    for idx = 1:numel(methods)
+        methodName = methods{idx};
+        methodMask = strcmp(timeResolvedTable.method, methodName);
+        methodRows = timeResolvedTable(methodMask, :);
+
+        configIds = unique(methodRows.configId);
+        for cIdx = 1:numel(configIds)
+            configMask = methodRows.configId == configIds(cIdx);
+            subset = methodRows(configMask, :);
+
+            timesUnique = unique(subset.t);
+            meanAcc = zeros(size(timesUnique));
+            for tIdx = 1:numel(timesUnique)
+                tMask = subset.t == timesUnique(tIdx);
+                meanAcc(tIdx) = mean(subset.accuracy(tMask));
+            end
+
+            if ~isempty(subset.configLabel) && iscell(subset.configLabel)
+                labelText = sprintf('%s (%s)', pretty_method_name(methodName), subset.configLabel{1});
+            else
+                labelText = pretty_method_name(methodName);
+            end
+            plot(timesUnique, meanAcc, '-o', 'LineWidth', 1.5, 'DisplayName', labelText);
+        end
+    end
+
+    xlabel('Time since movement onset (ms)');
+    ylabel('Mean CV accuracy (%)');
+    title('Time-resolved classifier accuracy');
+    legend('Location', 'southeast');
+
+    figureFile = fullfile(outputDir, 'classifier_accuracy_vs_time.png');
+    saveas(fig, figureFile);
+    close(fig);
+end
+
+function figureFile = plot_taskscore_bar(outputDir, optimizedPerformance)
+    figureFile = '';
+    if isempty(optimizedPerformance) || height(optimizedPerformance) == 0
+        return;
+    end
+    if ~ismember('meanTaskScore', optimizedPerformance.Properties.VariableNames)
+        return;
+    end
+
+    valid = ~isnan(optimizedPerformance.meanTaskScore);
+    subset = optimizedPerformance(valid, :);
+    if isempty(subset)
+        return;
+    end
+
+    [~, order] = sort(subset.meanTaskScore);
+    subset = subset(order, :);
+
+    fig = figure('Visible', 'off');
+    bar(subset.meanTaskScore);
+    hold on;
+    if ismember('stdTaskScore', subset.Properties.VariableNames)
+        errorbar(1:height(subset), subset.meanTaskScore, subset.stdTaskScore, ...
+            '.k', 'LineWidth', 1.25);
+    end
+    labels = cell(height(subset), 1);
+    for idx = 1:height(subset)
+        labels{idx} = sprintf('%s (%s)', ...
+            pretty_method_name(subset.method{idx}), subset.configLabel{idx});
+    end
+    set(gca, 'XTick', 1:height(subset), 'XTickLabel', labels, 'XTickLabelRotation', 30);
+    ylabel('Mean Task Score (0.9 RMSE + 0.1 Time)');
+    title('Optimised continuous methods ranked by Task Score');
+    grid on;
+
+    figureFile = fullfile(outputDir, 'optimized_taskscore.png');
+    saveas(fig, figureFile);
+    close(fig);
 end

@@ -1,0 +1,8 @@
+task,family,method,classifier,regressor,configId,configLabel,k,nPC,lambda,historyBins,bufferShort,bufferLong,smoothWin,notes
+classifier,classifier_screening,cosine_jared,cosine_similarity,none,1,default,NaN,NaN,NaN,NaN,NaN,NaN,NaN,Code-grounded from jared/positionEstimatorTraining.m classification stage.
+classifier,classifier_screening,knn_ming,knn,none,4,k=21,21,NaN,NaN,NaN,NaN,NaN,NaN,Code-grounded from Classifier_Ming/KNN/k.
+classifier,classifier_screening,nbc_ming,gaussian_naive_bayes,none,1,default,NaN,NaN,NaN,NaN,NaN,NaN,NaN,Code-grounded from Classifier_Ming/NBC.
+pipeline,final_pipeline,jared_direct,none,pooled_pcr,1,fixed,NaN,500,NaN,15,NaN,NaN,NaN,Direct pooled PCR baseline from jared/positionEstimator (2).
+pipeline,final_pipeline,jared_hybrid,cosine_similarity,direction_specific_ridge_pcr,1,fixed,NaN,500,1000,15,NaN,NaN,NaN,Classifier-conditioned final pipeline from jared/positionEstimatorTraining.m.
+regressor_pooled,regressor_screening,pooled_pcr,none,pcr,6,nPC=500,NaN,500,0,15,NaN,NaN,NaN,Shared pooled PCR screening baseline derived from the original dameer_grader.
+regressor_pooled,regressor_screening,pooled_ridge_pcr,none,ridge_pcr,24,nPC=500_lambda=100,NaN,500,100,15,NaN,NaN,NaN,Shared pooled ridge-PCR screening baseline using the dameer_grader feature pipeline.
