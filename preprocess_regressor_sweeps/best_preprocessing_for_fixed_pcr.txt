@@ -1,0 +1,6 @@
+Best preprocessing for pooled PCR (nPC=300):
+transform=sqrt
+binWidth=20
+historyBins=15
+meanRMSE=18.647359
+stdRMSE=0.546016
