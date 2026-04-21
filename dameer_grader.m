@@ -1423,6 +1423,12 @@ function figureFiles = generate_benchmark_figures(outputDir, classifierSummary, 
         figureFiles{end + 1} = hyperFiles{idx}; %#ok<AGROW>
     end
 
+        taskHyperFiles = plot_taskscore_hyperparameter_curves(outputDir, continuousSummary);
+    for idx = 1:numel(taskHyperFiles)
+        figureFiles{end + 1} = taskHyperFiles{idx}; %#ok<AGROW>
+    end
+
+
     comparisonFigure = plot_with_vs_without_classifier(outputDir, optimizedPerformance);
     if ~isempty(comparisonFigure)
         figureFiles{end + 1} = comparisonFigure; %#ok<AGROW>
@@ -1518,6 +1524,70 @@ function figureFiles = plot_rmse_hyperparameter_curves(outputDir, continuousSumm
         title(sprintf('RMSE vs nPC: %s', pretty_method_name(methodName)));
 
         figureFile = fullfile(outputDir, sprintf('rmse_vs_npc_%s.png', methodName));
+        saveas(fig, figureFile);
+        close(fig);
+        figureFiles{end + 1} = figureFile; %#ok<AGROW>
+    end
+end
+
+function figureFiles = plot_taskscore_hyperparameter_curves(outputDir, continuousSummary)
+    figureFiles = {};
+    if isempty(continuousSummary)
+        return;
+    end
+
+    methods = {'pooled_pcr', 'pooled_ridge_pcr'};
+    for methodIdx = 1:numel(methods)
+        methodName = methods{methodIdx};
+        mask = strcmp(continuousSummary.method, methodName);
+        subset = continuousSummary(mask, :);
+        if isempty(subset) || numel(unique(subset.nPC(~isnan(subset.nPC)))) < 2
+            continue;
+        end
+
+        validRows = ~isnan(subset.meanTaskScore);
+        subset = subset(validRows, :);
+        if isempty(subset)
+            continue;
+        end
+
+        fig = figure('Visible', 'off');
+        hold on;
+        grid on;
+
+        lambdaVals = unique(subset.lambda(~isnan(subset.lambda)));
+        if isempty(lambdaVals)
+            lambdaVals = NaN;
+        end
+
+        if numel(lambdaVals) == 1 && isnan(lambdaVals)
+            [xVals, order] = sort(subset.nPC);
+            yVals = subset.meanTaskScore(order);
+            plot(xVals, yVals, '-o', 'LineWidth', 1.5);
+        elseif numel(lambdaVals) <= 1
+            [xVals, order] = sort(subset.nPC);
+            yVals = subset.meanTaskScore(order);
+            plot(xVals, yVals, '-o', 'LineWidth', 1.5, ...
+                'DisplayName', sprintf('\\lambda = %.3g', lambdaVals(1)));
+            legend('Location', 'best');
+        else
+            for lambdaIdx = 1:numel(lambdaVals)
+                lambdaVal = lambdaVals(lambdaIdx);
+                lineMask = abs(subset.lambda - lambdaVal) < 1e-12;
+                lineSubset = subset(lineMask, :);
+                [xVals, order] = sort(lineSubset.nPC);
+                yVals = lineSubset.meanTaskScore(order);
+                plot(xVals, yVals, '-o', 'LineWidth', 1.5, ...
+                    'DisplayName', sprintf('\\lambda = %.3g', lambdaVal));
+            end
+            legend('Location', 'best');
+        end
+
+        xlabel('Number of principal components');
+        ylabel('Mean CV Task Score');
+        title(sprintf('Task Score vs nPC: %s', pretty_method_name(methodName)));
+
+        figureFile = fullfile(outputDir, sprintf('taskscore_vs_npc_%s.png', methodName));
         saveas(fig, figureFile);
         close(fig);
         figureFiles{end + 1} = figureFile; %#ok<AGROW>
