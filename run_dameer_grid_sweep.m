@@ -1,13 +1,13 @@
 clc; clear;
 
-% Simple pooled-regressor sweeps aligned to the project ask:
-%   1) preprocessing sweep -> fixed pooled PCR regressor (general / pooled)
-%   2) fixed preprocessing (20ms + Anscombe) -> sweep all pooled regressors
-%
-% NOTE: "pooled" here means trained on all directions (not movement-specific).
+% Ordered preprocessing + regressor sweeps.
+% Goal:
+%   - enforce exact preprocessing order per method
+%   - compare three preprocessing methods on pooled regressor RMSE
+%   - run Ming classifier hyperparameter sweeps
 
 repoRoot = fileparts(fileparts(mfilename('fullpath')));
-outputDir = fullfile(repoRoot, 'benchmark_outputs', 'preprocess_regressor_sweeps');
+outputDir = fullfile(repoRoot, 'benchmark_outputs', 'ordered_preprocess_and_classifier_sweeps');
 if exist(outputDir, 'dir') ~= 7
     mkdir(outputDir);
 end
@@ -17,190 +17,282 @@ baseOpts.plotFigures = false;
 baseOpts.saveOutputs = false;
 baseOpts.verbose = false;
 baseOpts.timestampOutputDir = false;
-baseOpts.classifierMethods = {};
+baseOpts.K = 5;
 baseOpts.pipelineMethods = {};
 baseOpts.includeKalman = false;
 
-%% ============================================================
-%  PART A: PREPROCESSING SWEEP (fixed pooled PCR regressor)
-% =============================================================
-%
-% Regressor fixed to pooled PCR with nPC = 300.
-% We only move preprocessing knobs and track RMSE movement.
+% ============================================================
+% PART A: ORDERED PREPROCESSING COMPARISON (three methods)
+% ============================================================
+% Method 1: gaussian smoothing on raw spikes -> binning -> sqrt
+% Method 2: rectangular smoothing on raw spikes -> anscombe -> gaussian smoothing
+% Method 3: baseline (binning -> anscombe)
 
-preBinWidthGrid = [10, 20, 25, 40];
-preHistoryGrid = [8, 12, 15, 20];
-preTransformGrid = {'none', 'sqrt', 'anscombe'};
-fixedNpcForPreSweep = 300;
+binWidthGrid = [5, 10, 20, 25, 40];
+historyGrid = [1, 4, 8, 12, 15, 20];
+fixedNpc = 300;
+
+methods = struct([]);
+
+methods(1).name = 'gauss_then_bin_then_sqrt';
+methods(1).transform = 'sqrt';
+methods(1).preKernel = 'gauss';
+methods(1).preWidthGrid = [3, 5, 9];
+methods(1).preParamGrid = [1.0, 2.0];
+methods(1).postKernel = 'none';
+methods(1).postWidthGrid = 0;
+methods(1).postParamGrid = 0;
+
+methods(2).name = 'rect_then_anscombe_then_gauss';
+methods(2).transform = 'anscombe';
+methods(2).preKernel = 'rect';
+methods(2).preWidthGrid = [3, 5, 9];
+methods(2).preParamGrid = 0;
+methods(2).postKernel = 'gauss';
+methods(2).postWidthGrid = [3, 5, 9];
+methods(2).postParamGrid = [1.0, 2.0];
+
+methods(3).name = 'baseline_bin_then_anscombe';
+methods(3).transform = 'anscombe';
+methods(3).preKernel = 'none';
+methods(3).preWidthGrid = 0;
+methods(3).preParamGrid = 0;
+methods(3).postKernel = 'none';
+methods(3).postWidthGrid = 0;
+methods(3).postParamGrid = 0;
 
 rowsA = {};
 expId = 0;
 
-for tIdx = 1:numel(preTransformGrid)
-    transformName = preTransformGrid{tIdx};
-    for bIdx = 1:numel(preBinWidthGrid)
-        binWidth = preBinWidthGrid(bIdx);
-        for hIdx = 1:numel(preHistoryGrid)
-            historyBins = preHistoryGrid(hIdx);
-            expId = expId + 1;
+for mIdx = 1:numel(methods)
+    method = methods(mIdx);
+    for bwIdx = 1:numel(binWidthGrid)
+        binWidth = binWidthGrid(bwIdx);
+        for hbIdx = 1:numel(historyGrid)
+            historyBins = historyGrid(hbIdx);
+            for pWIdx = 1:numel(method.preWidthGrid)
+                preWidth = method.preWidthGrid(pWIdx);
+                for pPIdx = 1:numel(method.preParamGrid)
+                    preParam = method.preParamGrid(pPIdx);
+                    for qWIdx = 1:numel(method.postWidthGrid)
+                        postWidth = method.postWidthGrid(qWIdx);
+                        for qPIdx = 1:numel(method.postParamGrid)
+                            postParam = method.postParamGrid(qPIdx);
+                            preParamLabel = format_smoothing_param(method.preKernel, preParam);
+                            postParamLabel = format_smoothing_param(method.postKernel, postParam);
 
-            fprintf('[A-%03d] transform=%s | bin=%d | history=%d | nPC=%d\n', ...
-                expId, transformName, binWidth, historyBins, fixedNpcForPreSweep);
+                            expId = expId + 1;
+                            fprintf('[A-%03d] %s | bin=%d | history=%d | pre=%s(w=%g,p=%s) | post=%s(w=%g,p=%s)\n', ...
+                                expId, method.name, binWidth, historyBins, ...
+                                method.preKernel, preWidth, preParamLabel, method.postKernel, postWidth, postParamLabel);
 
-            opts = baseOpts;
-            opts.pooledRegressorMethods = {'pooled_pcr'};
-            opts.pooledPCRGrid = fixedNpcForPreSweep;
-            opts.pooledBinWidth = binWidth;
-            opts.pooledHistoryBins = historyBins;
-            opts.pooledTransform = transformName;
+                            maxIterEstimate = floor(571 / binWidth) - historyBins;
+                            if maxIterEstimate <= 0
+                                fprintf('    -> skipped (insufficient bins)\n');
+                                meanRmse = NaN;
+                                stdRmse = NaN;
+                            else
+                                opts = baseOpts;
+                                opts.classifierMethods = {};
+                                opts.pooledRegressorMethods = {'pooled_pcr'};
+                                opts.pooledPCRGrid = fixedNpc;
+                                opts.pooledBinWidth = binWidth;
+                                opts.pooledHistoryBins = historyBins;
+                                opts.pooledTransform = method.transform;
+                                opts.pooledPreSmoothKernel = method.preKernel;
+                                opts.pooledPreSmoothWidth = preWidth;
+                                opts.pooledPreSmoothParam = preParam;
+                                opts.pooledPostSmoothKernel = method.postKernel;
+                                opts.pooledPostSmoothWidth = postWidth;
+                                opts.pooledPostSmoothParam = postParam;
 
-            benchmark = dameer_grader(opts);
-            summary = benchmark.tables.continuousSummary;
-            mask = strcmp(summary.method, 'pooled_pcr') & summary.nPC == fixedNpcForPreSweep;
-            subset = summary(mask, :);
+                                try
+                                    benchmark = dameer_grader(opts);
+                                    summary = benchmark.tables.continuousSummary;
+                                    mask = strcmp(summary.method, 'pooled_pcr') & summary.nPC == fixedNpc;
+                                    subset = summary(mask, :);
+                                    if isempty(subset)
+                                        meanRmse = NaN;
+                                        stdRmse = NaN;
+                                    else
+                                        meanRmse = subset.meanRMSE(1);
+                                        stdRmse = subset.stdRMSE(1);
+                                    end
+                                catch runErr
+                                    fprintf('    -> failed (%s)\n', runErr.message);
+                                    meanRmse = NaN;
+                                    stdRmse = NaN;
+                                end
+                            end
 
-            if isempty(subset)
-                meanRmse = NaN;
-                stdRmse = NaN;
-            else
-                meanRmse = subset.meanRMSE(1);
-                stdRmse = subset.stdRMSE(1);
+                            rowsA(end + 1, :) = { ...
+                                expId, string(method.name), binWidth, historyBins, string(method.transform), ...
+                                string(method.preKernel), preWidth, preParam, ...
+                                string(method.postKernel), postWidth, postParam, ...
+                                fixedNpc, meanRmse, stdRmse}; %#ok<AGROW>
+                        end
+                    end
+                end
             end
-
-            rowsA(end + 1, :) = {expId, string(transformName), binWidth, historyBins, ... %#ok<AGROW>
-                fixedNpcForPreSweep, meanRmse, stdRmse};
         end
     end
 end
 
-preprocessSweep = cell2table(rowsA, 'VariableNames', ...
-    {'expId', 'transform', 'binWidth', 'historyBins', 'nPC', 'meanRMSE', 'stdRMSE'});
-preprocessSweep = sortrows(preprocessSweep, {'meanRMSE', 'stdRMSE'}, {'ascend', 'ascend'});
+partA = cell2table(rowsA, 'VariableNames', { ...
+    'expId', 'method', 'binWidth', 'historyBins', 'transform', ...
+    'preKernel', 'preWidth', 'preParam', 'postKernel', 'postWidth', 'postParam', ...
+    'nPC', 'meanRMSE', 'stdRMSE'});
+partA = sortrows(partA, {'meanRMSE', 'stdRMSE'}, {'ascend', 'ascend'});
 
-partA_csv = fullfile(outputDir, 'preprocessing_rmse_sweep.csv');
-writetable(preprocessSweep, partA_csv);
+partA_csv = fullfile(outputDir, 'ordered_preprocessing_method_comparison.csv');
+writetable(partA, partA_csv);
 
-bestA = preprocessSweep(1, :);
-partA_txt = fullfile(outputDir, 'best_preprocessing_for_fixed_pcr.txt');
-fid = fopen(partA_txt, 'w');
-fprintf(fid, 'Best preprocessing for pooled PCR (nPC=%d):\n', fixedNpcForPreSweep);
-fprintf(fid, 'transform=%s\n', bestA.transform);
-fprintf(fid, 'binWidth=%d\n', bestA.binWidth);
-fprintf(fid, 'historyBins=%d\n', bestA.historyBins);
-fprintf(fid, 'meanRMSE=%.6f\n', bestA.meanRMSE);
-fprintf(fid, 'stdRMSE=%.6f\n', bestA.stdRMSE);
-fclose(fid);
-
-figA = figure('Visible', 'off');
-for tIdx = 1:numel(preTransformGrid)
-    transformName = string(preTransformGrid{tIdx});
-    subset = preprocessSweep(preprocessSweep.transform == transformName, :);
-    matrix = build_heatmap_matrix(subset, preBinWidthGrid, preHistoryGrid, 'meanRMSE');
-
-    subplot(1, numel(preTransformGrid), tIdx);
-    imagesc(preBinWidthGrid, preHistoryGrid, matrix);
-    axis xy;
-    colorbar;
-    xlabel('Bin width (ms)');
-    ylabel('History bins');
-    title(sprintf('transform=%s', transformName));
-end
-sgtitle(sprintf('RMSE movement for pooled PCR (nPC=%d)', fixedNpcForPreSweep));
-saveas(figA, fullfile(outputDir, 'preprocessing_rmse_heatmaps_fixed_pcr.png'));
-close(figA);
-
-%% ============================================================
-%  PART B: FIXED PREPROCESSING (20ms + Anscombe), SWEEP REGRESSORS
-% =============================================================
-%
-% Fixed preprocessing:
-%   - bin width = 20 ms
-%   - history bins = 15
-%   - transform = anscombe
-%
-% Sweep both pooled regressors and their hyperparameters.
-
-optsB = baseOpts;
-optsB.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
-optsB.pooledPCRGrid = [50, 100, 200, 300, 400, 500];
-optsB.pooledRidgePCRGrid = [50, 100, 200, 300, 400, 500];
-optsB.pooledRidgeLambdaGrid = [0.1, 1, 10, 100, 1000];
-optsB.pooledBinWidth = 20;
-optsB.pooledHistoryBins = 15;
-optsB.pooledTransform = 'anscombe';
-
-fprintf('\n[PART B] fixed preprocessing sweep: bin=20, history=15, transform=anscombe\n');
-benchmarkB = dameer_grader(optsB);
-summaryB = benchmarkB.tables.continuousSummary;
-regMask = strcmp(summaryB.task, 'regressor_pooled');
-regSummary = summaryB(regMask, :);
-regSummary = sortrows(regSummary, {'method', 'lambda', 'nPC'});
-
-partB_csv = fullfile(outputDir, 'fixed_preprocessing_regressor_sweep.csv');
-writetable(regSummary, partB_csv);
-
-% Best-by-RMSE per method
-methods = unique(regSummary.method);
-bestRows = repmat(regSummary(1, :), 0, 1);
-for mIdx = 1:numel(methods)
-    methodName = methods{mIdx};
-    subset = regSummary(strcmp(regSummary.method, methodName), :);
-    [~, bestIdx] = min(subset.meanRMSE);
-    bestRows(end + 1, :) = subset(bestIdx, :); %#ok<AGROW>
-end
-bestRows = sortrows(bestRows, {'meanRMSE', 'method'});
-partB_best_csv = fullfile(outputDir, 'best_regressor_by_method_fixed_preprocessing.csv');
-writetable(bestRows, partB_best_csv);
-
-% Plot RMSE vs nPC for pooled_pcr
-figB1 = figure('Visible', 'off');
-subsetPCR = regSummary(strcmp(regSummary.method, 'pooled_pcr'), :);
-[xPcr, ordPcr] = sort(subsetPCR.nPC);
-yPcr = subsetPCR.meanRMSE(ordPcr);
-plot(xPcr, yPcr, '-o', 'LineWidth', 1.5);
-grid on;
-xlabel('nPC');
-ylabel('Mean CV RMSE');
-title('Fixed preprocessing: pooled PCR RMSE vs nPC (20ms + Anscombe + 15 history)');
-saveas(figB1, fullfile(outputDir, 'fixed_preproc_rmse_vs_npc_pooled_pcr.png'));
-close(figB1);
-
-% Plot RMSE vs nPC for pooled_ridge_pcr by lambda
-figB2 = figure('Visible', 'off');
-hold on;
-grid on;
-subsetRidge = regSummary(strcmp(regSummary.method, 'pooled_ridge_pcr'), :);
-lambdaVals = unique(subsetRidge.lambda(~isnan(subsetRidge.lambda)));
-for lIdx = 1:numel(lambdaVals)
-    lambdaVal = lambdaVals(lIdx);
-    mask = abs(subsetRidge.lambda - lambdaVal) < 1e-12;
-    lineSubset = subsetRidge(mask, :);
-    [xVals, ord] = sort(lineSubset.nPC);
-    yVals = lineSubset.meanRMSE(ord);
-    plot(xVals, yVals, '-o', 'LineWidth', 1.5, ...
-        'DisplayName', sprintf('\\lambda = %.3g', lambdaVal));
-end
-legend('Location', 'best');
-xlabel('nPC');
-ylabel('Mean CV RMSE');
-title('Fixed preprocessing: pooled ridge-PCR RMSE vs nPC (20ms + Anscombe + 15 history)');
-saveas(figB2, fullfile(outputDir, 'fixed_preproc_rmse_vs_npc_pooled_ridge_pcr.png'));
-close(figB2);
-
-fprintf('\nSaved all sweep outputs to:\n%s\n', outputDir);
-fprintf('Part A CSV: %s\n', partA_csv);
-fprintf('Part B CSV: %s\n', partB_csv);
-fprintf('Best-per-method CSV: %s\n', partB_best_csv);
-
-function matrix = build_heatmap_matrix(subset, xVals, yVals, fieldName)
-    matrix = nan(numel(yVals), numel(xVals));
-    for yIdx = 1:numel(yVals)
-        for xIdx = 1:numel(xVals)
-            mask = subset.binWidth == xVals(xIdx) & subset.historyBins == yVals(yIdx);
-            if any(mask)
-                vals = subset.(fieldName)(mask);
-                matrix(yIdx, xIdx) = mean(vals, 'omitnan');
-            end
+methodNames = unique(partA.method);
+if isempty(partA)
+    bestByMethod = table();
+else
+    bestByMethod = repmat(partA(1, :), 0, 1);
+    for i = 1:numel(methodNames)
+        subset = partA(partA.method == methodNames(i), :);
+        subset = subset(~isnan(subset.meanRMSE), :);
+        if isempty(subset)
+            continue;
         end
+        bestByMethod(end + 1, :) = subset(1, :); %#ok<AGROW>
+    end
+    bestByMethod = sortrows(bestByMethod, {'meanRMSE', 'method'});
+end
+best_method_csv = fullfile(outputDir, 'ordered_preprocessing_best_by_method.csv');
+writetable(bestByMethod, best_method_csv);
+
+if ~isempty(bestByMethod)
+    figA = figure('Visible', 'off');
+    bar(bestByMethod.meanRMSE);
+    grid on;
+    set(gca, 'XTick', 1:height(bestByMethod), 'XTickLabel', cellstr(bestByMethod.method), 'XTickLabelRotation', 25);
+    ylabel('Mean CV RMSE (lower is better)');
+    title('Best config from each ordered preprocessing method');
+    saveas(figA, fullfile(outputDir, 'ordered_preprocessing_best_method_rmse.png'));
+    close(figA);
+end
+
+% ============================================================
+% PART B: FIXED PREPROCESSING REGRESSOR HYPERPARAMETER SWEEP
+% ============================================================
+% Uses the single best ordered method from Part A and sweeps pooled regressors.
+
+if isempty(bestByMethod)
+    warning('Part B skipped because Part A produced no valid rows.');
+    partB = table();
+else
+    winner = bestByMethod(1, :);
+    optsB = baseOpts;
+    optsB.classifierMethods = {};
+    optsB.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
+    maxPcFromFeatures = 98 * (winner.historyBins + 1);
+    pcGrid = unique([50, 100, 200, 300, 400, 500, 700, 900, 1200, maxPcFromFeatures]);
+    optsB.pooledPCRGrid = pcGrid;
+    optsB.pooledRidgePCRGrid = pcGrid;
+    optsB.pooledRidgeLambdaGrid = [0.01, 0.1, 1, 10, 100, 1000, 3000, 10000];
+
+    optsB.pooledBinWidth = winner.binWidth;
+    optsB.pooledHistoryBins = winner.historyBins;
+    optsB.pooledTransform = char(winner.transform);
+    optsB.pooledPreSmoothKernel = char(winner.preKernel);
+    optsB.pooledPreSmoothWidth = winner.preWidth;
+    optsB.pooledPreSmoothParam = winner.preParam;
+    optsB.pooledPostSmoothKernel = char(winner.postKernel);
+    optsB.pooledPostSmoothWidth = winner.postWidth;
+    optsB.pooledPostSmoothParam = winner.postParam;
+
+    fprintf('\n[PART B] winner preprocessing = %s\n', winner.method);
+    fprintf('[PART B] sweeping nPC grid: %s\n', mat2str(pcGrid));
+    fprintf('[PART B] sweeping lambda grid: %s\n', mat2str(optsB.pooledRidgeLambdaGrid));
+    benchmarkB = dameer_grader(optsB);
+    summaryB = benchmarkB.tables.continuousSummary;
+    partB = summaryB(strcmp(summaryB.task, 'regressor_pooled'), :);
+    partB = sortrows(partB, {'method', 'lambda', 'nPC'});
+end
+
+partB_csv = fullfile(outputDir, 'winner_preprocessing_regressor_hyper_sweep.csv');
+writetable(partB, partB_csv);
+
+if ~isempty(partB)
+    figB = figure('Visible', 'off');
+    hold on; grid on;
+    ridge = partB(strcmp(partB.method, 'pooled_ridge_pcr'), :);
+    lambdas = unique(ridge.lambda(~isnan(ridge.lambda)));
+    for l = 1:numel(lambdas)
+        lam = lambdas(l);
+        subset = ridge(abs(ridge.lambda - lam) < 1e-12, :);
+        [x, ord] = sort(subset.nPC);
+        y = subset.meanRMSE(ord);
+        plot(x, y, '-o', 'DisplayName', sprintf('ridge \\lambda=%.3g', lam));
+    end
+    pcr = partB(strcmp(partB.method, 'pooled_pcr'), :);
+    [xp, ordp] = sort(pcr.nPC);
+    yp = pcr.meanRMSE(ordp);
+    plot(xp, yp, '-s', 'LineWidth', 1.5, 'DisplayName', 'pooled pcr');
+    legend('Location', 'best');
+    xlabel('nPC'); ylabel('Mean CV RMSE');
+    title('Regressor hyperparameter sweep on winning ordered preprocessing');
+    saveas(figB, fullfile(outputDir, 'winner_preprocessing_regressor_hyper_sweep.png'));
+    close(figB);
+end
+
+% ============================================================
+% PART C: Ming classifier hyperparameter sweep
+% ============================================================
+% Available Ming classifiers in dameer_grader: nbc_ming and knn_ming.
+
+optsC = baseOpts;
+optsC.classifierMethods = {'nbc_ming', 'knn_ming'};
+optsC.classifierKGrid = [1, 3, 5, 7, 11, 15, 21, 31];
+optsC.pooledRegressorMethods = {};
+
+benchmarkC = dameer_grader(optsC);
+cls = benchmarkC.tables.classifierSummary;
+cls = sortrows(cls, {'method', 'k'});
+
+cls_csv = fullfile(outputDir, 'ming_classifier_hyper_sweep.csv');
+writetable(cls, cls_csv);
+
+if ~isempty(cls)
+    figC = figure('Visible', 'off');
+    hold on; grid on;
+    knn = cls(strcmp(cls.method, 'knn_ming'), :);
+    if ~isempty(knn)
+        [xk, ordk] = sort(knn.k);
+        yk = knn.meanAccuracy(ordk);
+        plot(xk, yk, '-o', 'LineWidth', 1.5, 'DisplayName', 'knn_ming');
+    end
+    nbc = cls(strcmp(cls.method, 'nbc_ming'), :);
+    if ~isempty(nbc)
+        yNbc = nbc.meanAccuracy(1);
+        xSpan = [min(optsC.classifierKGrid), max(optsC.classifierKGrid)];
+        plot(xSpan, [yNbc, yNbc], '--', 'LineWidth', 1.3, ...
+            'DisplayName', sprintf('nbc_ming = %.2f%%', yNbc));
+    end
+    xlabel('k (for kNN)');
+    ylabel('Mean CV Accuracy (%)');
+    title('Ming classifier hyperparameter sweep');
+    legend('Location', 'best');
+    saveas(figC, fullfile(outputDir, 'ming_classifier_hyper_sweep.png'));
+    close(figC);
+end
+
+fprintf('\nSaved outputs to: %s\n', outputDir);
+fprintf('Part A method comparison: %s\n', partA_csv);
+fprintf('Part B regressor sweep:   %s\n', partB_csv);
+fprintf('Part C classifier sweep:  %s\n', cls_csv);
+
+function label = format_smoothing_param(kernelName, paramVal)
+    kernel = lower(string(kernelName));
+    if kernel == "none" || kernel == "rect"
+        label = 'n/a';
+    elseif isnan(paramVal)
+        label = 'auto';
+    else
+        label = sprintf('%.3g', paramVal);
     end
 end

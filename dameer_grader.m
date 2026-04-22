@@ -26,7 +26,7 @@ end
 
 function opts = default_benchmark_options(repoRoot)
     opts = struct();
-    opts.dataFile = fullfile(repoRoot, 'monkeydata_training.mat');
+    opts.dataFile = fullfile(repoRoot, 'monkeydata0.mat');
     opts.seed = 42;
     opts.K = 5;
     opts.startMs = 320;
@@ -50,6 +50,12 @@ function opts = default_benchmark_options(repoRoot)
     opts.pooledHistoryBins = 15;
     opts.pooledBinWidth = 20;
     opts.pooledTransform = 'anscombe';
+    opts.pooledPreSmoothKernel = 'none';
+    opts.pooledPreSmoothWidth = 0;
+    opts.pooledPreSmoothParam = NaN;
+    opts.pooledPostSmoothKernel = 'none';
+    opts.pooledPostSmoothWidth = 0;
+    opts.pooledPostSmoothParam = NaN;
 
     % Final pipeline defaults.
     opts.pipelineMethods = {'jared_direct', 'jared_hybrid'};
@@ -125,7 +131,7 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
         'causal', opts.causal, ...
         'plotting', false);
     runSpecs = build_run_specs(opts, repoRoot);
-    runSpecsTable = struct2table(runSpecs);
+    runSpecsTable = struct2table(runSpecs, 'AsArray', true);
 
     if isempty(runSpecs)
         error('No benchmark methods selected. Check the options passed to dameer_grader.');
@@ -193,11 +199,13 @@ function benchmark = run_unified_benchmark(opts, repoRoot)
         end
     end
 
-    rawTable = struct2table(rawRows);
+ 
+    rawTable = struct2table(rawRows, 'AsArray', true);
     if isempty(timeResolvedRows)
         timeResolvedTable = empty_timeresolved_table();
     else
-        timeResolvedTable = struct2table(timeResolvedRows);
+       
+        timeResolvedTable = struct2table(timeResolvedRows, 'AsArray', true);
     end
     [foldTable, foldStruct] = fold_manifest_table(folds);
 
@@ -406,6 +414,12 @@ function runSpecs = build_run_specs(opts, repoRoot)
                 'historyBins', opts.pooledHistoryBins, ...
                 'binWidth', opts.pooledBinWidth, ...
                 'transform', opts.pooledTransform, ...
+                'preSmoothKernel', opts.pooledPreSmoothKernel, ...
+                'preSmoothWidth', opts.pooledPreSmoothWidth, ...
+                'preSmoothParam', opts.pooledPreSmoothParam, ...
+                'postSmoothKernel', opts.pooledPostSmoothKernel, ...
+                'postSmoothWidth', opts.pooledPostSmoothWidth, ...
+                'postSmoothParam', opts.pooledPostSmoothParam, ...
                 'notes', 'Shared pooled PCR screening baseline derived from the original dameer_grader.');
         end
     end
@@ -432,6 +446,12 @@ function runSpecs = build_run_specs(opts, repoRoot)
                     'historyBins', opts.pooledHistoryBins, ...
                     'binWidth', opts.pooledBinWidth, ...
                     'transform', opts.pooledTransform, ...
+                    'preSmoothKernel', opts.pooledPreSmoothKernel, ...
+                    'preSmoothWidth', opts.pooledPreSmoothWidth, ...
+                    'preSmoothParam', opts.pooledPreSmoothParam, ...
+                    'postSmoothKernel', opts.pooledPostSmoothKernel, ...
+                    'postSmoothWidth', opts.pooledPostSmoothWidth, ...
+                    'postSmoothParam', opts.pooledPostSmoothParam, ...
                     'notes', 'Shared pooled ridge-PCR screening baseline using the dameer_grader feature pipeline.');
                 configId = configId + 1;
             end
@@ -516,6 +536,12 @@ function spec = empty_run_spec()
         'historyBins', NaN, ...
         'binWidth', NaN, ...
         'transform', '', ...
+        'preSmoothKernel', 'none', ...
+        'preSmoothWidth', 0, ...
+        'preSmoothParam', NaN, ...
+        'postSmoothKernel', 'none', ...
+        'postSmoothWidth', 0, ...
+        'postSmoothParam', NaN, ...
         'bufferShort', NaN, ...
         'bufferLong', NaN, ...
         'smoothWin', NaN, ...
@@ -598,7 +624,15 @@ function metrics = evaluate_local_continuous_fold(runSpec, trainData, testData, 
         'lambda', runSpec.lambda, ...
         'historyBins', runSpec.historyBins, ...
         'binWidth', binWidth, ...
-        'transform', transformName);
+        'transform', transformName, ...
+        'preSmoothKernel', runSpec.preSmoothKernel, ...
+        'preSmoothWidth', runSpec.preSmoothWidth, ...
+        'preSmoothParam', runSpec.preSmoothParam, ...
+        'postSmoothKernel', runSpec.postSmoothKernel, ...
+        'postSmoothWidth', runSpec.postSmoothWidth, ...
+        'postSmoothParam', runSpec.postSmoothParam);
+        
+
     model = train_local_pooled_regressor(trainData, cfg);
     trainTime = toc(trainTimer);
 
@@ -890,8 +924,10 @@ function model = train_local_pooled_regressor(trainingData, cfg)
     [numTrials, numDirs] = size(trainingData);
     numNeurons = size(trainingData(1, 1).spikes, 1);
     processed = initialize_bin_width(trainingData);
+    processed = smooth_dataset(processed, cfg.preSmoothKernel, cfg.preSmoothWidth, cfg.preSmoothParam);
     processed = rebin_dataset(processed, cfg.binWidth);
     processed = transform_dataset(processed, cfg.transform);
+    processed = smooth_dataset(processed, cfg.postSmoothKernel, cfg.postSmoothWidth, cfg.postSmoothParam);
 
     minLength = minimum_trial_length(trainingData);
     maxIter = floor(minLength / cfg.binWidth) - cfg.historyBins;
@@ -924,18 +960,33 @@ function model = train_local_pooled_regressor(trainingData, cfg)
 
     muX = mean(X, 1);
     centeredX = X - muX;
-    [~, ~, V] = svd(centeredX, 'econ');
-    nPC = min(cfg.nPC, size(V, 2));
+    [~, S, V] = svd(centeredX, 'econ');
+    singularVals = diag(S);
+    svdTol = max(size(centeredX)) * eps(max(singularVals));
+    effectiveRank = sum(singularVals > svdTol);
+    nPC = min(cfg.nPC, effectiveRank);
+    if nPC < 1
+        error('Insufficient effective rank in pooled regressor design matrix.');
+    end
     Vreduced = V(:, 1:nPC);
     projectedX = centeredX * Vreduced;
     projectedX = [projectedX, ones(size(projectedX, 1), 1)];
+
+    fitMode = 'ols';
 
     if cfg.lambda > 0
         penalty = cfg.lambda * eye(size(projectedX, 2));
         penalty(end, end) = 0;
         B = (projectedX' * projectedX + penalty) \ (projectedX' * Y);
+        fitMode = 'ridge';
     else
-        B = projectedX \ Y;
+        designRank = rank(projectedX);
+        if designRank < size(projectedX, 2)
+            B = pinv(projectedX) * Y;
+            fitMode = 'pinv_fallback';
+        else
+            B = projectedX \ Y;
+        end
     end
 
     model = struct();
@@ -945,6 +996,13 @@ function model = train_local_pooled_regressor(trainingData, cfg)
     model.binWidth = cfg.binWidth;
     model.historyBins = cfg.historyBins;
     model.transform = cfg.transform;
+    model.preSmoothKernel = cfg.preSmoothKernel;
+    model.preSmoothWidth = cfg.preSmoothWidth;
+    model.preSmoothParam = cfg.preSmoothParam;
+    model.postSmoothKernel = cfg.postSmoothKernel;
+    model.postSmoothWidth = cfg.postSmoothWidth;
+    model.postSmoothParam = cfg.postSmoothParam;
+    model.fitMode = fitMode;
 end
 
 function [rmse, numPredictions] = score_local_continuous_model(model, testData, evalConfig)
@@ -956,11 +1014,18 @@ function [rmse, numPredictions] = score_local_continuous_model(model, testData, 
         for dirIdx = 1:numDirs
             decodedHandPos = [];
             times = evalConfig.startMs:evalConfig.stepMs:size(testData(trialIdx, dirIdx).spikes, 2);
+            fullyProcessed = preprocess_spike_matrix( ...
+                testData(trialIdx, dirIdx).spikes, ...
+                model.preSmoothKernel, model.preSmoothWidth, model.preSmoothParam, ...
+                model.binWidth, model.transform, ...
+                model.postSmoothKernel, model.postSmoothWidth, model.postSmoothParam);
 
             for t = times
                 sample = struct();
                 sample.trialId = testData(trialIdx, dirIdx).trialId;
                 sample.spikes = testData(trialIdx, dirIdx).spikes(:, 1:t);
+                usableBins = floor(t / model.binWidth);
+                sample.preprocessedSpikes = fullyProcessed(:, 1:min(usableBins, size(fullyProcessed, 2)));
                 sample.decodedHandPos = decodedHandPos;
                 sample.startHandPos = testData(trialIdx, dirIdx).handPos(1:2, 1);
 
@@ -980,8 +1045,19 @@ function [rmse, numPredictions] = score_local_continuous_model(model, testData, 
 end
 
 function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model)
-    binnedSpikes = rebin_spike_matrix(testSample.spikes, model.binWidth);
-    transformedSpikes = apply_transform_to_matrix(binnedSpikes, model.transform);
+    rawSpikes = apply_smoothing_to_matrix( ...
+        testSample.spikes, model.preSmoothKernel, model.preSmoothWidth, model.preSmoothParam);
+    if isfield(testSample, 'preprocessedSpikes')
+        transformedSpikes = testSample.preprocessedSpikes;
+    else
+        transformedSpikes = preprocess_spike_matrix( ...
+            testSample.spikes, ...
+            model.preSmoothKernel, model.preSmoothWidth, model.preSmoothParam, ...
+            model.binWidth, model.transform, ...
+            model.postSmoothKernel, model.postSmoothWidth, model.postSmoothParam);
+    end
+    transformedSpikes = apply_smoothing_to_matrix( ...
+        transformedSpikes, model.postSmoothKernel, model.postSmoothWidth, model.postSmoothParam);
     numFeatureBins = model.historyBins + 1;
     numAvailableBins = size(transformedSpikes, 2);
     numNeurons = size(transformedSpikes, 1);
@@ -1010,6 +1086,12 @@ function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model
 
     decodedX = previousX + predictedVelocity(1);
     decodedY = previousY + predictedVelocity(2);
+end
+function transformedSpikes = preprocess_spike_matrix(rawSpikes, preKernel, preWidth, preParam, binWidth, transformName, postKernel, postWidth, postParam)
+    smoothedRaw = apply_smoothing_to_matrix(rawSpikes, preKernel, preWidth, preParam);
+    binnedSpikes = rebin_spike_matrix(smoothedRaw, binWidth);
+    transformedSpikes = apply_transform_to_matrix(binnedSpikes, transformName);
+    transformedSpikes = apply_smoothing_to_matrix(transformedSpikes, postKernel, postWidth, postParam);
 end
 
 function [rmse, numPredictions] = score_generic_position_estimator(testData, modelParameters, evalConfig, predictReturnsState)
@@ -1080,6 +1162,54 @@ function processed = transform_dataset(dataStruct, transformName)
         processed(idx).spikes = apply_transform_to_matrix(processed(idx).spikes, transformName);
     end
 end
+
+function processed = smooth_dataset(dataStruct, kernelName, kernelWidth, kernelParam)
+    processed = dataStruct;
+    for idx = 1:numel(processed)
+        processed(idx).spikes = apply_smoothing_to_matrix( ...
+            processed(idx).spikes, kernelName, kernelWidth, kernelParam);
+    end
+end
+
+function smoothed = apply_smoothing_to_matrix(dataMatrix, kernelName, kernelWidth, kernelParam)
+    if nargin < 4 || isempty(kernelParam) || isnan(kernelParam)
+        kernelParam = max(kernelWidth / 3, 1);
+    end
+    if nargin < 3 || isempty(kernelWidth)
+        kernelWidth = 0;
+    end
+    if nargin < 2 || isempty(kernelName)
+        kernelName = 'none';
+    end
+
+    kName = lower(string(kernelName));
+    if kernelWidth <= 1 || kName == "none"
+        smoothed = dataMatrix;
+        return;
+    end
+
+    switch kName
+        case "rect"
+            kernel = ones(1, kernelWidth) / kernelWidth;
+            smoothed = filter(kernel, 1, dataMatrix, [], 2);
+        case {"gauss", "gaussian"}
+            support = -kernelWidth:kernelWidth;
+            sigma = max(kernelParam, eps);
+            kernel = exp(-(support .^ 2) / (2 * sigma ^ 2));
+            kernel = kernel / sum(kernel);
+            smoothed = conv2(dataMatrix, kernel, 'same');
+        case "cgauss"
+            support = -kernelWidth:kernelWidth;
+            sigma = max(kernelParam, eps);
+            kernel = exp(-(support .^ 2) / (2 * sigma ^ 2));
+            kernel(support < 0) = 0;
+            kernel = kernel / max(sum(kernel), eps);
+            smoothed = conv2(dataMatrix, kernel, 'same');
+        otherwise
+            error('Unknown smoothing kernel: %s', kernelName);
+    end
+end
+
 
 function transformed = apply_transform_to_matrix(dataMatrix, transformName)
     switch lower(transformName)
@@ -1268,7 +1398,7 @@ function summaryTable = summarize_results(rawTable)
         end
     end
 
-    summaryTable = struct2table(summaryRows);
+    summaryTable = struct2table(summaryRows, 'AsArray', true);
 end
 
 function keys = make_group_keys(rawTable)
@@ -1423,7 +1553,7 @@ function figureFiles = generate_benchmark_figures(outputDir, classifierSummary, 
         figureFiles{end + 1} = hyperFiles{idx}; %#ok<AGROW>
     end
 
-        taskHyperFiles = plot_taskscore_hyperparameter_curves(outputDir, continuousSummary);
+    taskHyperFiles = plot_taskscore_hyperparameter_curves(outputDir, continuousSummary);
     for idx = 1:numel(taskHyperFiles)
         figureFiles{end + 1} = taskHyperFiles{idx}; %#ok<AGROW>
     end
