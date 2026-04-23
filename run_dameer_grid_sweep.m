@@ -1,4 +1,4 @@
-clc; clear;
+ clc; clear;
 
 % Ordered preprocessing + regressor sweeps.
 % Goal:
@@ -188,12 +188,13 @@ else
     winner = bestByMethod(1, :);
     optsB = baseOpts;
     optsB.classifierMethods = {};
-    optsB.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
+    optsB.pooledRegressorMethods = {'pooled_pcr', 'pooled_ols_ridge', 'pooled_pls'};
     maxPcFromFeatures = 98 * (winner.historyBins + 1);
-    pcGrid = unique([50, 100, 200, 300, 400, 500, 700, 900, 1200, maxPcFromFeatures]);
-    optsB.pooledPCRGrid = pcGrid;
-    optsB.pooledRidgePCRGrid = pcGrid;
-    optsB.pooledRidgeLambdaGrid = [0.01, 0.1, 1, 10, 100, 1000, 3000, 10000];
+    compGrid = unique([1, 3, 5, 7, 10, 30, 50, 70, 100, ...
+        min(300, maxPcFromFeatures), min(500, maxPcFromFeatures), min(700, maxPcFromFeatures)]);
+    optsB.pooledPCRGrid = compGrid;
+    optsB.pooledOLSRidgeLambdaGrid = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000];
+    optsB.pooledPLSGrid = compGrid;
 
     optsB.pooledBinWidth = winner.binWidth;
     optsB.pooledHistoryBins = winner.historyBins;
@@ -206,8 +207,8 @@ else
     optsB.pooledPostSmoothParam = winner.postParam;
 
     fprintf('\n[PART B] winner preprocessing = %s\n', winner.method);
-    fprintf('[PART B] sweeping nPC grid: %s\n', mat2str(pcGrid));
-    fprintf('[PART B] sweeping lambda grid: %s\n', mat2str(optsB.pooledRidgeLambdaGrid));
+    fprintf('[PART B] sweeping component grid (PCR/PLS): %s\n', mat2str(compGrid));
+    fprintf('[PART B] sweeping lambda grid (OLS+Ridge): %s\n', mat2str(optsB.pooledOLSRidgeLambdaGrid));
     benchmarkB = dameer_grader(optsB);
     summaryB = benchmarkB.tables.continuousSummary;
     partB = summaryB(strcmp(summaryB.task, 'regressor_pooled'), :);
@@ -220,21 +221,23 @@ writetable(partB, partB_csv);
 if ~isempty(partB)
     figB = figure('Visible', 'off');
     hold on; grid on;
-    ridge = partB(strcmp(partB.method, 'pooled_ridge_pcr'), :);
-    lambdas = unique(ridge.lambda(~isnan(ridge.lambda)));
-    for l = 1:numel(lambdas)
-        lam = lambdas(l);
-        subset = ridge(abs(ridge.lambda - lam) < 1e-12, :);
-        [x, ord] = sort(subset.nPC);
-        y = subset.meanRMSE(ord);
-        plot(x, y, '-o', 'DisplayName', sprintf('ridge \\lambda=%.3g', lam));
-    end
     pcr = partB(strcmp(partB.method, 'pooled_pcr'), :);
-    [xp, ordp] = sort(pcr.nPC);
-    yp = pcr.meanRMSE(ordp);
-    plot(xp, yp, '-s', 'LineWidth', 1.5, 'DisplayName', 'pooled pcr');
+    if ~isempty(pcr)
+        [xp, ordp] = sort(pcr.nPC);
+        plot(xp, pcr.meanRMSE(ordp), '-s', 'LineWidth', 1.5, 'DisplayName', 'PCR');
+    end
+    pls = partB(strcmp(partB.method, 'pooled_pls'), :);
+    if ~isempty(pls)
+        [xp, ordp] = sort(pls.nPC);
+        plot(xp, pls.meanRMSE(ordp), '-^', 'LineWidth', 1.5, 'DisplayName', 'PLS');
+    end
+    ols = partB(strcmp(partB.method, 'pooled_ols_ridge'), :);
+    if ~isempty(ols)
+        [xl, ordl] = sort(ols.lambda);
+        plot(xl, ols.meanRMSE(ordl), '-o', 'LineWidth', 1.5, 'DisplayName', 'OLS+Ridge');
+    end
     legend('Location', 'best');
-    xlabel('nPC'); ylabel('Mean CV RMSE');
+    xlabel('nComponents / \lambda'); ylabel('Mean CV RMSE');
     title('Regressor hyperparameter sweep on winning ordered preprocessing');
     saveas(figB, fullfile(outputDir, 'winner_preprocessing_regressor_hyper_sweep.png'));
     close(figB);

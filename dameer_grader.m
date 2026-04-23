@@ -26,7 +26,7 @@ end
 
 function opts = default_benchmark_options(repoRoot)
     opts = struct();
-    opts.dataFile = fullfile(repoRoot, 'monkeydata0.mat');
+    opts.dataFile = fullfile(repoRoot, 'BMI', 'monkeydata0.mat');
     opts.seed = 42;
     opts.K = 5;
     opts.startMs = 320;
@@ -43,10 +43,12 @@ function opts = default_benchmark_options(repoRoot)
     % Screening defaults.
     opts.classifierMethods = {'cosine_jared', 'nbc_ming', 'knn_ming', 'lda_jared'};
     opts.classifierKGrid = [1, 5, 11, 21];
-    opts.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
-    opts.pooledPCRGrid = [50, 100, 200, 300, 400, 500];
+    opts.pooledRegressorMethods = {'pooled_pcr', 'pooled_ols_ridge', 'pooled_pls'};
+    opts.pooledPCRGrid = [1, 3, 5, 7, 10, 30, 50, 70, 100, 300, 500, 700];
     opts.pooledRidgePCRGrid = [50, 100, 200, 300, 400, 500];
     opts.pooledRidgeLambdaGrid = [0.1, 1, 10, 100];
+    opts.pooledOLSRidgeLambdaGrid = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000];
+    opts.pooledPLSGrid = [1, 3, 5, 7, 10, 30, 50, 70, 100, 300, 500, 700];
     opts.pooledHistoryBins = 15;
     opts.pooledBinWidth = 20;
     opts.pooledTransform = 'anscombe';
@@ -458,6 +460,64 @@ function runSpecs = build_run_specs(opts, repoRoot)
         end
     end
 
+    if ismember('pooled_ols_ridge', opts.pooledRegressorMethods)
+        for lambdaIdx = 1:numel(opts.pooledOLSRidgeLambdaGrid)
+            lambdaVal = opts.pooledOLSRidgeLambdaGrid(lambdaIdx);
+            runSpecs(end + 1) = make_run_spec( ...
+                'task', 'regressor_pooled', ...
+                'family', 'regressor_screening', ...
+                'method', 'pooled_ols_ridge', ...
+                'executor', 'continuous_local', ...
+                'localKind', 'pooled_regressor', ...
+                'configId', lambdaIdx, ...
+                'configLabel', sprintf('lambda=%.3g', lambdaVal), ...
+                'classifier', 'none', ...
+                'regressor', 'ols_ridge', ...
+                'preprocess', '20ms_bins_anscombe_16bin_history', ...
+                'nPC', NaN, ...
+                'lambda', lambdaVal, ...
+                'historyBins', opts.pooledHistoryBins, ...
+                'binWidth', opts.pooledBinWidth, ...
+                'transform', opts.pooledTransform, ...
+                'preSmoothKernel', opts.pooledPreSmoothKernel, ...
+                'preSmoothWidth', opts.pooledPreSmoothWidth, ...
+                'preSmoothParam', opts.pooledPreSmoothParam, ...
+                'postSmoothKernel', opts.pooledPostSmoothKernel, ...
+                'postSmoothWidth', opts.pooledPostSmoothWidth, ...
+                'postSmoothParam', opts.pooledPostSmoothParam, ...
+                'notes', 'OLS with ridge regularization on raw features (no PCA). Bias not penalised.');
+        end
+    end
+
+    if ismember('pooled_pls', opts.pooledRegressorMethods)
+        for idx = 1:numel(opts.pooledPLSGrid)
+            nComp = opts.pooledPLSGrid(idx);
+            runSpecs(end + 1) = make_run_spec( ...
+                'task', 'regressor_pooled', ...
+                'family', 'regressor_screening', ...
+                'method', 'pooled_pls', ...
+                'executor', 'continuous_local', ...
+                'localKind', 'pooled_regressor', ...
+                'configId', idx, ...
+                'configLabel', sprintf('nComp=%d', nComp), ...
+                'classifier', 'none', ...
+                'regressor', 'pls', ...
+                'preprocess', '20ms_bins_anscombe_16bin_history', ...
+                'nPC', nComp, ...
+                'lambda', 0, ...
+                'historyBins', opts.pooledHistoryBins, ...
+                'binWidth', opts.pooledBinWidth, ...
+                'transform', opts.pooledTransform, ...
+                'preSmoothKernel', opts.pooledPreSmoothKernel, ...
+                'preSmoothWidth', opts.pooledPreSmoothWidth, ...
+                'preSmoothParam', opts.pooledPreSmoothParam, ...
+                'postSmoothKernel', opts.pooledPostSmoothKernel, ...
+                'postSmoothWidth', opts.pooledPostSmoothWidth, ...
+                'postSmoothParam', opts.pooledPostSmoothParam, ...
+                'notes', 'Partial Least Squares regression. nPC field holds number of PLS components.');
+        end
+    end
+
     % Final pipeline comparisons.
     if ismember('jared_direct', opts.pipelineMethods)
         runSpecs(end + 1) = make_run_spec( ...
@@ -633,7 +693,16 @@ function metrics = evaluate_local_continuous_fold(runSpec, trainData, testData, 
         'postSmoothParam', runSpec.postSmoothParam);
         
 
-    model = train_local_pooled_regressor(trainData, cfg);
+    switch runSpec.method
+        case {'pooled_pcr', 'pooled_ridge_pcr'}
+            model = train_local_pooled_regressor(trainData, cfg);
+        case 'pooled_ols_ridge'
+            model = train_local_pooled_ols_ridge(trainData, cfg);
+        case 'pooled_pls'
+            model = train_local_pooled_pls(trainData, cfg);
+        otherwise
+            error('Unknown pooled regressor method: %s', runSpec.method);
+    end
     trainTime = toc(trainTimer);
 
     testTimer = tic;
@@ -990,6 +1059,7 @@ function model = train_local_pooled_regressor(trainingData, cfg)
     end
 
     model = struct();
+    model.kind = 'pcr';
     model.B = B;
     model.muX = muX;
     model.Vreduced = Vreduced;
@@ -1045,8 +1115,19 @@ function [rmse, numPredictions] = score_local_continuous_model(model, testData, 
 end
 
 function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model)
-    rawSpikes = apply_smoothing_to_matrix( ...
-        testSample.spikes, model.preSmoothKernel, model.preSmoothWidth, model.preSmoothParam);
+    switch model.kind
+        case 'pcr'
+            [decodedX, decodedY] = predict_pcr_internal(testSample, model);
+        case 'ols_ridge'
+            [decodedX, decodedY] = predict_ols_ridge_internal(testSample, model);
+        case 'pls'
+            [decodedX, decodedY] = predict_pls_internal(testSample, model);
+        otherwise
+            error('Unknown model kind: %s', model.kind);
+    end
+end
+
+function recentBins = extract_recent_bins(testSample, model)
     if isfield(testSample, 'preprocessedSpikes')
         transformedSpikes = testSample.preprocessedSpikes;
     else
@@ -1061,7 +1142,6 @@ function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model
     numFeatureBins = model.historyBins + 1;
     numAvailableBins = size(transformedSpikes, 2);
     numNeurons = size(transformedSpikes, 1);
-
     if numAvailableBins < numFeatureBins
         padded = zeros(numNeurons, numFeatureBins);
         padded(:, end - numAvailableBins + 1:end) = transformedSpikes;
@@ -1069,13 +1149,9 @@ function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model
     else
         recentBins = transformedSpikes(:, end - numFeatureBins + 1:end);
     end
+end
 
-    Xtest = reshape(recentBins, 1, []);
-    centered = Xtest - model.muX;
-    projected = centered * model.Vreduced;
-    projected = [projected, 1];
-    predictedVelocity = projected * model.B;
-
+function [decodedX, decodedY] = integrate_velocity(predictedVelocity, testSample)
     if isempty(testSample.decodedHandPos)
         previousX = testSample.startHandPos(1);
         previousY = testSample.startHandPos(2);
@@ -1083,9 +1159,151 @@ function [decodedX, decodedY] = predict_local_pooled_regressor(testSample, model
         previousX = testSample.decodedHandPos(1, end);
         previousY = testSample.decodedHandPos(2, end);
     end
-
     decodedX = previousX + predictedVelocity(1);
     decodedY = previousY + predictedVelocity(2);
+end
+
+function [decodedX, decodedY] = predict_pcr_internal(testSample, model)
+    recentBins = extract_recent_bins(testSample, model);
+    Xtest = reshape(recentBins, 1, []);
+    centered = Xtest - model.muX;
+    projected = centered * model.Vreduced;
+    projected = [projected, 1];
+    predictedVelocity = projected * model.B;
+    [decodedX, decodedY] = integrate_velocity(predictedVelocity, testSample);
+end
+
+function [decodedX, decodedY] = predict_ols_ridge_internal(testSample, model)
+    recentBins = extract_recent_bins(testSample, model);
+    Xtest = reshape(recentBins, 1, []);
+    augmented = [Xtest - model.muX, 1];
+    predictedVelocity = augmented * model.B;
+    [decodedX, decodedY] = integrate_velocity(predictedVelocity, testSample);
+end
+
+function [decodedX, decodedY] = predict_pls_internal(testSample, model)
+    recentBins = extract_recent_bins(testSample, model);
+    Xtest = reshape(recentBins, 1, []);
+    predictedVelocity = [1, Xtest] * model.BETA;
+    [decodedX, decodedY] = integrate_velocity(predictedVelocity, testSample);
+end
+
+function model = train_local_pooled_ols_ridge(trainingData, cfg)
+    [numTrials, numDirs] = size(trainingData);
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+    processed = initialize_bin_width(trainingData);
+    processed = smooth_dataset(processed, cfg.preSmoothKernel, cfg.preSmoothWidth, cfg.preSmoothParam);
+    processed = rebin_dataset(processed, cfg.binWidth);
+    processed = transform_dataset(processed, cfg.transform);
+    processed = smooth_dataset(processed, cfg.postSmoothKernel, cfg.postSmoothWidth, cfg.postSmoothParam);
+
+    minLength = minimum_trial_length(trainingData);
+    maxIter = floor(minLength / cfg.binWidth) - cfg.historyBins;
+    if maxIter < 1
+        error('Not enough data to build the OLS-ridge design matrix.');
+    end
+
+    numRows = numTrials * numDirs * maxIter;
+    numFeatures = numNeurons * (cfg.historyBins + 1);
+    X = zeros(numRows, numFeatures);
+    Y = zeros(numRows, 2);
+    rowIdx = 1;
+
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            for timeIdx = 1:maxIter
+                X(rowIdx, :) = reshape( ...
+                    processed(trialIdx, dirIdx).spikes(:, timeIdx:cfg.historyBins + timeIdx), ...
+                    1, []);
+                currentMs = (cfg.historyBins + timeIdx) * cfg.binWidth;
+                previousMs = (cfg.historyBins + timeIdx - 1) * cfg.binWidth;
+                Y(rowIdx, 1) = trainingData(trialIdx, dirIdx).handPos(1, currentMs) ...
+                    - trainingData(trialIdx, dirIdx).handPos(1, previousMs);
+                Y(rowIdx, 2) = trainingData(trialIdx, dirIdx).handPos(2, currentMs) ...
+                    - trainingData(trialIdx, dirIdx).handPos(2, previousMs);
+                rowIdx = rowIdx + 1;
+            end
+        end
+    end
+
+    muX = mean(X, 1);
+    centeredX = X - muX;
+    augX = [centeredX, ones(size(centeredX, 1), 1)];
+    penalty = cfg.lambda * eye(size(augX, 2));
+    penalty(end, end) = 0;
+    B = (augX' * augX + penalty) \ (augX' * Y);
+
+    model = struct();
+    model.kind = 'ols_ridge';
+    model.B = B;
+    model.muX = muX;
+    model.binWidth = cfg.binWidth;
+    model.historyBins = cfg.historyBins;
+    model.transform = cfg.transform;
+    model.preSmoothKernel = cfg.preSmoothKernel;
+    model.preSmoothWidth = cfg.preSmoothWidth;
+    model.preSmoothParam = cfg.preSmoothParam;
+    model.postSmoothKernel = cfg.postSmoothKernel;
+    model.postSmoothWidth = cfg.postSmoothWidth;
+    model.postSmoothParam = cfg.postSmoothParam;
+end
+
+function model = train_local_pooled_pls(trainingData, cfg)
+    [numTrials, numDirs] = size(trainingData);
+    numNeurons = size(trainingData(1, 1).spikes, 1);
+    processed = initialize_bin_width(trainingData);
+    processed = smooth_dataset(processed, cfg.preSmoothKernel, cfg.preSmoothWidth, cfg.preSmoothParam);
+    processed = rebin_dataset(processed, cfg.binWidth);
+    processed = transform_dataset(processed, cfg.transform);
+    processed = smooth_dataset(processed, cfg.postSmoothKernel, cfg.postSmoothWidth, cfg.postSmoothParam);
+
+    minLength = minimum_trial_length(trainingData);
+    maxIter = floor(minLength / cfg.binWidth) - cfg.historyBins;
+    if maxIter < 1
+        error('Not enough data to build the PLS design matrix.');
+    end
+
+    numRows = numTrials * numDirs * maxIter;
+    numFeatures = numNeurons * (cfg.historyBins + 1);
+    X = zeros(numRows, numFeatures);
+    Y = zeros(numRows, 2);
+    rowIdx = 1;
+
+    for trialIdx = 1:numTrials
+        for dirIdx = 1:numDirs
+            for timeIdx = 1:maxIter
+                X(rowIdx, :) = reshape( ...
+                    processed(trialIdx, dirIdx).spikes(:, timeIdx:cfg.historyBins + timeIdx), ...
+                    1, []);
+                currentMs = (cfg.historyBins + timeIdx) * cfg.binWidth;
+                previousMs = (cfg.historyBins + timeIdx - 1) * cfg.binWidth;
+                Y(rowIdx, 1) = trainingData(trialIdx, dirIdx).handPos(1, currentMs) ...
+                    - trainingData(trialIdx, dirIdx).handPos(1, previousMs);
+                Y(rowIdx, 2) = trainingData(trialIdx, dirIdx).handPos(2, currentMs) ...
+                    - trainingData(trialIdx, dirIdx).handPos(2, previousMs);
+                rowIdx = rowIdx + 1;
+            end
+        end
+    end
+
+    nComp = min(cfg.nPC, min(size(X)) - 1);
+    if nComp < 1
+        error('Cannot fit PLS with fewer than 1 component.');
+    end
+    [~, ~, ~, ~, BETA] = plsregress(X, Y, nComp);
+
+    model = struct();
+    model.kind = 'pls';
+    model.BETA = BETA;
+    model.binWidth = cfg.binWidth;
+    model.historyBins = cfg.historyBins;
+    model.transform = cfg.transform;
+    model.preSmoothKernel = cfg.preSmoothKernel;
+    model.preSmoothWidth = cfg.preSmoothWidth;
+    model.preSmoothParam = cfg.preSmoothParam;
+    model.postSmoothKernel = cfg.postSmoothKernel;
+    model.postSmoothWidth = cfg.postSmoothWidth;
+    model.postSmoothParam = cfg.postSmoothParam;
 end
 function transformedSpikes = preprocess_spike_matrix(rawSpikes, preKernel, preWidth, preParam, binWidth, transformName, postKernel, postWidth, postParam)
     smoothedRaw = apply_smoothing_to_matrix(rawSpikes, preKernel, preWidth, preParam);
@@ -1608,9 +1826,9 @@ function figureFiles = plot_rmse_hyperparameter_curves(outputDir, continuousSumm
         return;
     end
 
-    methods = {'pooled_pcr', 'pooled_ridge_pcr'};
-    for methodIdx = 1:numel(methods)
-        methodName = methods{methodIdx};
+    npcMethods = {'pooled_pcr', 'pooled_ridge_pcr', 'pooled_pls'};
+    for methodIdx = 1:numel(npcMethods)
+        methodName = npcMethods{methodIdx};
         mask = strcmp(continuousSummary.method, methodName);
         subset = continuousSummary(mask, :);
         if isempty(subset) || numel(unique(subset.nPC(~isnan(subset.nPC)))) < 2
@@ -1649,11 +1867,29 @@ function figureFiles = plot_rmse_hyperparameter_curves(outputDir, continuousSumm
             legend('Location', 'best');
         end
 
-        xlabel('Number of principal components');
+        xlabel('Number of components');
         ylabel('Mean CV RMSE');
-        title(sprintf('RMSE vs nPC: %s', pretty_method_name(methodName)));
+        title(sprintf('RMSE vs nComponents: %s', pretty_method_name(methodName)));
 
         figureFile = fullfile(outputDir, sprintf('rmse_vs_npc_%s.png', methodName));
+        saveas(fig, figureFile);
+        close(fig);
+        figureFiles{end + 1} = figureFile; %#ok<AGROW>
+    end
+
+    olsRidgeMask = strcmp(continuousSummary.method, 'pooled_ols_ridge');
+    olsSubset = continuousSummary(olsRidgeMask, :);
+    if ~isempty(olsSubset) && numel(unique(olsSubset.lambda(~isnan(olsSubset.lambda)))) >= 2
+        fig = figure('Visible', 'off');
+        hold on; grid on;
+        [xVals, order] = sort(olsSubset.lambda);
+        yVals = olsSubset.meanRMSE(order);
+        plot(xVals, yVals, '-o', 'LineWidth', 1.5);
+        set(gca, 'XScale', 'log');
+        xlabel('\lambda');
+        ylabel('Mean CV RMSE');
+        title('RMSE vs \lambda: pooled OLS ridge');
+        figureFile = fullfile(outputDir, 'rmse_vs_lambda_pooled_ols_ridge.png');
         saveas(fig, figureFile);
         close(fig);
         figureFiles{end + 1} = figureFile; %#ok<AGROW>
@@ -1666,9 +1902,9 @@ function figureFiles = plot_taskscore_hyperparameter_curves(outputDir, continuou
         return;
     end
 
-    methods = {'pooled_pcr', 'pooled_ridge_pcr'};
-    for methodIdx = 1:numel(methods)
-        methodName = methods{methodIdx};
+    npcMethods = {'pooled_pcr', 'pooled_ridge_pcr', 'pooled_pls'};
+    for methodIdx = 1:numel(npcMethods)
+        methodName = npcMethods{methodIdx};
         mask = strcmp(continuousSummary.method, methodName);
         subset = continuousSummary(mask, :);
         if isempty(subset) || numel(unique(subset.nPC(~isnan(subset.nPC)))) < 2
@@ -1713,11 +1949,30 @@ function figureFiles = plot_taskscore_hyperparameter_curves(outputDir, continuou
             legend('Location', 'best');
         end
 
-        xlabel('Number of principal components');
+        xlabel('Number of components');
         ylabel('Mean CV Task Score');
-        title(sprintf('Task Score vs nPC: %s', pretty_method_name(methodName)));
+        title(sprintf('Task Score vs nComponents: %s', pretty_method_name(methodName)));
 
         figureFile = fullfile(outputDir, sprintf('taskscore_vs_npc_%s.png', methodName));
+        saveas(fig, figureFile);
+        close(fig);
+        figureFiles{end + 1} = figureFile; %#ok<AGROW>
+    end
+
+    olsRidgeMask = strcmp(continuousSummary.method, 'pooled_ols_ridge');
+    olsSubset = continuousSummary(olsRidgeMask, :);
+    olsSubset = olsSubset(~isnan(olsSubset.meanTaskScore), :);
+    if ~isempty(olsSubset) && numel(unique(olsSubset.lambda(~isnan(olsSubset.lambda)))) >= 2
+        fig = figure('Visible', 'off');
+        hold on; grid on;
+        [xVals, order] = sort(olsSubset.lambda);
+        yVals = olsSubset.meanTaskScore(order);
+        plot(xVals, yVals, '-o', 'LineWidth', 1.5);
+        set(gca, 'XScale', 'log');
+        xlabel('\lambda');
+        ylabel('Mean CV Task Score');
+        title('Task Score vs \lambda: pooled OLS ridge');
+        figureFile = fullfile(outputDir, 'taskscore_vs_lambda_pooled_ols_ridge.png');
         saveas(fig, figureFile);
         close(fig);
         figureFiles{end + 1} = figureFile; %#ok<AGROW>
