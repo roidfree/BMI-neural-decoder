@@ -2,7 +2,8 @@
 % Training matches positionEstimatorTraining_PCA_LDA_K; plot LD1 vs LD2 with
 % kNN distances in full LDA space (LD3+ fixed at training-set mean; 2D slice).
 %
-% Misclassifications on training points use leave-one-out kNN.
+% Red crosses mark points whose true label disagrees with the plotted 2D slice
+% (LD3+ fixed at training-set mean), i.e., visual mismatches in this map.
 %
 %   plot_PCA_LDA_KNN_decision_regions
 
@@ -52,7 +53,12 @@ for gi = 1:nGrid
 end
 Z = reshape(predGrid, gridRes, gridRes);
 
-mis = knnLooMisclass(Xtr, ytr, k);
+mis = false(size(ytr));
+for i = 1:numel(ytr)
+    row = sliceTail;
+    row(1:2) = Xtr(i, 1:2);
+    mis(i) = knnMode1(row, Xtr, ytr, k) ~= ytr(i);
+end
 
 cmap8 = [
     0.85 0.15 0.15
@@ -114,7 +120,7 @@ hX = plot(NaN, NaN, 'rx', 'LineWidth', 2.2);
 hStar = plot(NaN, NaN, 'k*', 'MarkerSize', 16, 'LineWidth', 1.2);
 legend([hPatch, hPt, hX, hStar], ...
     {'Decision regions (kNN, full LD dim)', 'Data points (true direction)', ...
-    'Misclassified (LOO-kNN)', 'Class means (LD1–LD2)'}, ...
+    'Mismatch with plotted 2D slice', 'Class means (LD1–LD2)'}, ...
     'Location', 'northwest', 'FontSize', 9);
 
 hold off;
@@ -125,14 +131,3 @@ function pred = knnMode1(x, Xref, yref, k)
     pred = mode(yref(ord(1:k)));
 end
 
-function mis = knnLooMisclass(X, y, k)
-    n = size(X, 1);
-    pred = zeros(n, 1);
-    for i = 1:n
-        d2 = sum((X - X(i, :)) .^ 2, 2);
-        d2(i) = inf;
-        [~, ord] = sort(d2, 'ascend');
-        pred(i) = mode(y(ord(1:k)));
-    end
-    mis = pred ~= y;
-end

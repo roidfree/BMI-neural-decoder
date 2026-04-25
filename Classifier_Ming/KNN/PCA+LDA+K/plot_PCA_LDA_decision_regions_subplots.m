@@ -64,7 +64,6 @@ v2 = v(:, 1:2);
 PC = X * v2;
 ldaMdl2d = trainLdaPooled2d(PC, labels, numClasses);
 predLda = predictLda2d(PC, ldaMdl2d);
-misLda = predLda ~= labels;
 
 pc1 = PC(:, 1);
 pc2 = PC(:, 2);
@@ -74,6 +73,8 @@ x1 = linspace(min(pc1) - pad1, max(pc1) + pad1, gridRes);
 x2 = linspace(min(pc2) - pad2, max(pc2) + pad2, gridRes);
 [PC1g, PC2g] = meshgrid(x1, x2);
 Zpc = reshape(predictLda2d([PC1g(:), PC2g(:)], ldaMdl2d), gridRes, gridRes);
+predAtPcPoints = labelFromPlottedGrid(pc1, pc2, x1, x2, Zpc);
+misLda = predAtPcPoints ~= labels;
 
 %% ----- Right: LD1–LD2 slice, kNN (full LDA dim) -----
 modelParameters = positionEstimatorTraining_PCA_LDA_K(trainingData, knnK, pcaDim, ldaDim);
@@ -98,7 +99,8 @@ for gi = 1:nGrid
     predGrid(gi) = knnMode1(row, Xtr, ytr, kVal);
 end
 Zld = reshape(predGrid, gridRes, gridRes);
-misKnn = knnLooMisclass(Xtr, ytr, kVal);
+predAtLdPoints = labelFromPlottedGrid(ld1, ld2, g1, g2, Zld);
+misKnn = predAtLdPoints ~= ytr;
 
 %% ----- Figure -----
 figure('Color', 'w', 'Position', [60 80 1200 520]);
@@ -114,19 +116,28 @@ axis equal tight;
 box on;
 set(gca, 'Layer', 'top', 'GridLineStyle', ':', 'GridAlpha', 0.35);
 grid on;
-scatter(pc1, pc2, 40, labels, 'filled', ...
+hPatchL = patch('XData', [NaN NaN NaN], 'YData', [NaN NaN NaN], ...
+    'FaceColor', [0.7 0.85 0.7], 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+scatter(pc1, pc2, 46, labels, 'filled', ...
     'MarkerEdgeColor', [0.15 0.15 0.15], 'LineWidth', 0.35, 'MarkerFaceAlpha', 0.92);
+hPtL = scatter(NaN, NaN, 46, 0.5, 'filled', 'MarkerEdgeColor', 'k');
 if any(misLda)
-    plot(pc1(misLda), pc2(misLda), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
+    plot(pc1(misLda), pc2(misLda), 'rx', 'MarkerSize', 8, 'LineWidth', 1.8);
 end
+hXL = plot(NaN, NaN, 'rx', 'LineWidth', 1.8);
 for d = 1:numClasses
     m = mean(PC(labels == d, :), 1);
     plot(m(1), m(2), 'k*', 'MarkerSize', 14, 'LineWidth', 1.1);
     text(m(1), m(2), sprintf('  %d', d), 'FontSize', 10, 'FontWeight', 'bold');
 end
+hStarL = plot(NaN, NaN, 'k*', 'MarkerSize', 14, 'LineWidth', 1.1);
 xlabel('PC1');
 ylabel('PC2');
 title('PCA space');
+legend([hPatchL, hPtL, hXL, hStarL], ...
+    {'Decision regions (LDA)', 'Data points (true direction)', ...
+    'Misclassified (LDA)', 'Class means (PC1-PC2)'}, ...
+    'Location', 'northwest', 'FontSize', 8);
 hold off;
 
 nexttile;
@@ -139,16 +150,21 @@ axis equal tight;
 box on;
 set(gca, 'Layer', 'top', 'GridLineStyle', ':', 'GridAlpha', 0.35);
 grid on;
-scatter(ld1, ld2, 40, ytr, 'filled', ...
+hPatchR = patch('XData', [NaN NaN NaN], 'YData', [NaN NaN NaN], ...
+    'FaceColor', [0.7 0.85 0.7], 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+scatter(ld1, ld2, 46, ytr, 'filled', ...
     'MarkerEdgeColor', [0.15 0.15 0.15], 'LineWidth', 0.35, 'MarkerFaceAlpha', 0.92);
+hPtR = scatter(NaN, NaN, 46, 0.5, 'filled', 'MarkerEdgeColor', 'k');
 if any(misKnn)
-    plot(ld1(misKnn), ld2(misKnn), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
+    plot(ld1(misKnn), ld2(misKnn), 'rx', 'MarkerSize', 8, 'LineWidth', 1.8);
 end
+hXR = plot(NaN, NaN, 'rx', 'LineWidth', 1.8);
 for d = 1:numClasses
     m = mean(Xtr(ytr == d, 1:2), 1);
     plot(m(1), m(2), 'k*', 'MarkerSize', 14, 'LineWidth', 1.1);
     text(m(1), m(2), sprintf('  %d', d), 'FontSize', 10, 'FontWeight', 'bold');
 end
+hStarR = plot(NaN, NaN, 'k*', 'MarkerSize', 14, 'LineWidth', 1.1);
 xlabel('LD1');
 ylabel('LD2');
 if ldaD > 2
@@ -156,7 +172,11 @@ if ldaD > 2
 else
     sliceNote = '';
 end
-title(sprintf('LDA space', kVal, pcaDim, ldaD, sliceNote));
+title(sprintf('LDA space%s', sliceNote));
+legend([hPatchR, hPtR, hXR, hStarR], ...
+    {'Decision regions (kNN, full LDA dim)', 'Data points (true direction)', ...
+    'Mismatch with plotted 2D slice', 'Class means (LD1-LD2)'}, ...
+    'Location', 'northwest', 'FontSize', 8);
 hold off;
 
 cb = colorbar;
@@ -207,14 +227,14 @@ function pred = knnMode1(x, Xref, yref, k)
     pred = mode(yref(ord(1:k)));
 end
 
-function mis = knnLooMisclass(X, y, k)
-    n = size(X, 1);
-    pred = zeros(n, 1);
-    for i = 1:n
-        d2 = sum((X - X(i, :)) .^ 2, 2);
-        d2(i) = inf;
-        [~, ord] = sort(d2, 'ascend');
-        pred(i) = mode(y(ord(1:k)));
-    end
-    mis = pred ~= y;
+function pred = labelFromPlottedGrid(xq, yq, xGrid, yGrid, Z)
+    nx = numel(xGrid);
+    ny = numel(yGrid);
+    ix = round((xq - xGrid(1)) ./ (xGrid(end) - xGrid(1) + eps) * (nx - 1)) + 1;
+    iy = round((yq - yGrid(1)) ./ (yGrid(end) - yGrid(1) + eps) * (ny - 1)) + 1;
+    ix = min(max(ix, 1), nx);
+    iy = min(max(iy, 1), ny);
+    lin = sub2ind([ny, nx], iy, ix);
+    pred = Z(lin);
 end
+
