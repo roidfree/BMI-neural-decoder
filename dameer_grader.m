@@ -41,7 +41,7 @@ function opts = default_benchmark_options(repoRoot)
     opts.taskScoreEnabled = false;
 
     % Screening defaults.
-    opts.classifierMethods = {'cosine_jared', 'nbc_ming', 'knn_ming', 'lda_jared'};
+    opts.classifierMethods = {'cosine_jared', 'nbc_ming', 'knn_ming', 'svm_ming'};
     opts.classifierKGrid = [1, 5, 11, 21];
     opts.pooledRegressorMethods = {'pooled_pcr', 'pooled_ridge_pcr'};
     opts.pooledPCRGrid = [50, 100, 200, 300, 400, 500];
@@ -352,21 +352,6 @@ function runSpecs = build_run_specs(opts, repoRoot)
             'notes', 'Code-grounded from Classifier_Ming/NBC.');
     end
 
-    if ismember('lda_jared', opts.classifierMethods)
-        runSpecs(end + 1) = make_run_spec( ...
-            'task', 'classifier', ...
-            'family', 'classifier_screening', ...
-            'method', 'lda_jared', ...
-            'executor', 'classifier_local', ...
-            'localKind', 'lda_jared', ...
-            'configId', 1, ...
-            'configLabel', 'default', ...
-            'classifier', 'lda_shrinkage', ...
-            'regressor', 'none', ...
-            'preprocess', 'early_cumulative_counts_anscombe', ...
-            'notes', 'Pooled-covariance LDA on Anscombe(cumulative counts); matches the exemplar report classifier.');
-    end
-
     if ismember('knn_ming', opts.classifierMethods)
         for idx = 1:numel(opts.classifierKGrid)
             kVal = opts.classifierKGrid(idx);
@@ -384,6 +369,22 @@ function runSpecs = build_run_specs(opts, repoRoot)
                 'k', kVal, ...
                 'notes', 'Code-grounded from Classifier_Ming/KNN/k.');
         end
+    end
+
+    if ismember('svm_ming', opts.classifierMethods)
+        runSpecs(end + 1) = make_run_spec( ...
+            'task', 'classifier', ...
+            'family', 'classifier_screening', ...
+            'method', 'svm_ming', ...
+            'executor', 'classifier_local', ...
+            'localKind', 'svm_ming', ...
+            'configId', 1, ...
+            'configLabel', 'default', ...
+            'classifier', 'linear_svm_ova', ...
+            'regressor', 'none', ...
+            'preprocess', 'early_320ms_spike_counts', ...
+            'notes', ['Code-grounded from Classifier_Ming/SVM/SVM, ' ...
+                'but evaluated with the shared horizon sweep for fair comparison.']);
     end
 
     % Pooled regressor screening.
@@ -553,8 +554,8 @@ function metrics = evaluate_local_classifier_fold(runSpec, trainData, testData, 
                 model = train_classifier_nbc_ming(trainData, horizon);
             case 'knn_ming'
                 model = train_classifier_knn_ming(trainData, runSpec.k, horizon);
-            case 'lda_jared'
-                model = train_classifier_lda_jared(trainData, horizon);
+            case 'svm_ming'
+                model = train_classifier_svm_ming(trainData, horizon);
             otherwise
                 error('Unknown local classifier kind: %s', runSpec.localKind);
         end
@@ -663,8 +664,8 @@ function [accuracy, numSamples] = score_classifier_model(localKind, model, testD
                     predDir = predict_classifier_nbc_ming(sample, model);
                 case 'knn_ming'
                     predDir = predict_classifier_knn_ming(sample, model);
-                case 'lda_jared'
-                    predDir = predict_classifier_lda_jared(sample, model);
+                case 'svm_ming'
+                    predDir = predict_classifier_svm_ming(sample, model);
                 otherwise
                     error('Unknown local classifier kind: %s', localKind);
             end
@@ -822,15 +823,16 @@ function predDir = predict_classifier_knn_ming(testSample, model)
     predDir = mode(nearestLabels);
 end
 
-function model = train_classifier_lda_jared(trainingData, horizon)
+function model = train_classifier_svm_ming(trainingData, horizon)
     if nargin < 2 || isempty(horizon)
         horizon = 320;
     end
     [numTrials, numDirs] = size(trainingData);
     numNeurons = size(trainingData(1, 1).spikes, 1);
+    numSamples = numTrials * numDirs;
+    features = zeros(numSamples, numNeurons);
+    labels = zeros(numSamples, 1);
 
-    features = zeros(numTrials * numDirs, numNeurons);
-    labels = zeros(numTrials * numDirs, 1);
     rowIdx = 1;
     for trialIdx = 1:numTrials
         for dirIdx = 1:numDirs
@@ -842,48 +844,127 @@ function model = train_classifier_lda_jared(trainingData, horizon)
         end
     end
 
-    % Anscombe transform keeps variance ~constant across neurons (report §II-B).
-    features = 2 * sqrt(features + 3 / 8);
-
-    classMeans = zeros(numDirs, numNeurons);
-    priors = zeros(numDirs, 1);
-    pooledCov = zeros(numNeurons, numNeurons);
-    total = size(features, 1);
-
+    C = 1;
+    tol = 1e-3;
+    maxPasses = 5;
+    binaryModels = cell(numDirs, 1);
     for dirIdx = 1:numDirs
-        classMask = labels == dirIdx;
-        Xc = features(classMask, :);
-        classMeans(dirIdx, :) = mean(Xc, 1);
-        priors(dirIdx) = size(Xc, 1) / total;
-        centered = Xc - classMeans(dirIdx, :);
-        pooledCov = pooledCov + centered' * centered;
+        binaryLabels = double(labels == dirIdx);
+        binaryModels{dirIdx} = train_binary_linear_svm_ming(features, binaryLabels, C, tol, maxPasses);
     end
 
-    pooledCov = pooledCov / max(total - numDirs, 1);
-    % Shrinkage toward a diagonal target keeps the covariance invertible when
-    % numNeurons is close to the per-class sample count.
-    shrinkage = 1e-3;
-    diagTarget = diag(diag(pooledCov));
-    pooledCov = (1 - shrinkage) * pooledCov + shrinkage * diagTarget;
-    regularizer = 1e-6 * mean(diag(pooledCov)) * eye(numNeurons);
-    Sigma = pooledCov + regularizer;
-
-    W = (Sigma \ classMeans')';
-    b = -0.5 * sum(W .* classMeans, 2) + log(priors + eps);
-
     model = struct( ...
-        'W', W, ...
-        'b', b, ...
+        'models', {binaryModels}, ...
         'horizon', horizon);
 end
 
-function predDir = predict_classifier_lda_jared(testSample, model)
+function predDir = predict_classifier_svm_ming(testSample, model)
     spikes = testSample.spikes;
     endIdx = min(model.horizon, size(spikes, 2));
     feature = sum(spikes(:, 1:endIdx), 2)';
-    feature = 2 * sqrt(feature + 3 / 8);
-    scores = model.W * feature' + model.b;
+    numDirs = numel(model.models);
+    scores = zeros(numDirs, 1);
+
+    for dirIdx = 1:numDirs
+        binaryModel = model.models{dirIdx};
+        scores(dirIdx) = feature * binaryModel.w + binaryModel.b;
+    end
+
     [~, predDir] = max(scores);
+end
+
+function model = train_binary_linear_svm_ming(X, Y, C, tol, maxPasses)
+    if nargin < 3 || isempty(C)
+        C = 1;
+    end
+    if nargin < 4 || isempty(tol)
+        tol = 1e-3;
+    end
+    if nargin < 5 || isempty(maxPasses)
+        maxPasses = 5;
+    end
+
+    m = size(X, 1);
+    Y(Y == 0) = -1;
+
+    alphas = zeros(m, 1);
+    b = 0;
+    E = zeros(m, 1);
+    passes = 0;
+    K = X * X';
+
+    while passes < maxPasses
+        numChangedAlphas = 0;
+        for i = 1:m
+            E(i) = b + sum(alphas .* Y .* K(:, i)) - Y(i);
+
+            if ((Y(i) * E(i) < -tol && alphas(i) < C) || ...
+                    (Y(i) * E(i) > tol && alphas(i) > 0))
+                j = ceil(m * rand());
+                while j == i
+                    j = ceil(m * rand());
+                end
+
+                E(j) = b + sum(alphas .* Y .* K(:, j)) - Y(j);
+                alphaIOld = alphas(i);
+                alphaJOld = alphas(j);
+
+                if Y(i) == Y(j)
+                    L = max(0, alphas(j) + alphas(i) - C);
+                    H = min(C, alphas(j) + alphas(i));
+                else
+                    L = max(0, alphas(j) - alphas(i));
+                    H = min(C, C + alphas(j) - alphas(i));
+                end
+
+                if L == H
+                    continue;
+                end
+
+                eta = 2 * K(i, j) - K(i, i) - K(j, j);
+                if eta >= 0
+                    continue;
+                end
+
+                alphas(j) = alphas(j) - (Y(j) * (E(i) - E(j))) / eta;
+                alphas(j) = min(H, alphas(j));
+                alphas(j) = max(L, alphas(j));
+
+                if abs(alphas(j) - alphaJOld) < tol
+                    alphas(j) = alphaJOld;
+                    continue;
+                end
+
+                alphas(i) = alphas(i) + Y(i) * Y(j) * (alphaJOld - alphas(j));
+
+                b1 = b - E(i) ...
+                    - Y(i) * (alphas(i) - alphaIOld) * K(i, j) ...
+                    - Y(j) * (alphas(j) - alphaJOld) * K(i, j);
+                b2 = b - E(j) ...
+                    - Y(i) * (alphas(i) - alphaIOld) * K(i, j) ...
+                    - Y(j) * (alphas(j) - alphaJOld) * K(j, j);
+
+                if 0 < alphas(i) && alphas(i) < C
+                    b = b1;
+                elseif 0 < alphas(j) && alphas(j) < C
+                    b = b2;
+                else
+                    b = (b1 + b2) / 2;
+                end
+
+                numChangedAlphas = numChangedAlphas + 1;
+            end
+        end
+
+        if numChangedAlphas == 0
+            passes = passes + 1;
+        else
+            passes = 0;
+        end
+    end
+
+    w = ((alphas .* Y)' * X)';
+    model = struct('w', w, 'b', b);
 end
 
 function model = train_local_pooled_regressor(trainingData, cfg)
