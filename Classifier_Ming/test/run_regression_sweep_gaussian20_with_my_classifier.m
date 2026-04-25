@@ -9,13 +9,13 @@ function resultsTable = run_regression_sweep_gaussian20_with_my_classifier(teamN
 %
 % Usage:
 %   T = run_regression_sweep_gaussian20_with_my_classifier
-%   T = run_regression_sweep_gaussian20_with_my_classifier('test', 'deviation', {'pcr_ridge','pls'})
+%   T = run_regression_sweep_gaussian20_with_my_classifier('test', 'velocity', {'pcr_ridge','pls'})
 
     if nargin < 1
         teamName = '';
     end
     if nargin < 2 || isempty(targetMode)
-        targetMode = 'deviation';
+        targetMode = 'velocity';
     end
     if nargin < 3 || isempty(regressionMethods)
         regressionMethods = {'avg_only', 'ols', 'pcr', 'pcr_ridge', 'pls'};

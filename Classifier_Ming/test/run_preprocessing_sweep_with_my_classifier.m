@@ -9,14 +9,14 @@ function resultsTable = run_preprocessing_sweep_with_my_classifier(teamName, tar
 %
 % Usage:
 %   T = run_preprocessing_sweep_with_my_classifier
-%   T = run_preprocessing_sweep_with_my_classifier('test', 'deviation', 'pcr_ridge')
-%   T = run_preprocessing_sweep_with_my_classifier('test', 'deviation', {'pcr_ridge','pls'})
+%   T = run_preprocessing_sweep_with_my_classifier('test', 'velocity', 'pcr_ridge')
+%   T = run_preprocessing_sweep_with_my_classifier('test', 'velocity', {'pcr_ridge','pls'})
 
     if nargin < 1
         teamName = '';
     end
     if nargin < 2 || isempty(targetMode)
-        targetMode = 'deviation';
+        targetMode = 'velocity';
     end
     if nargin < 3 || isempty(regressionMethod)
         regressionMethod = {'pcr_ridge', 'pls'};
