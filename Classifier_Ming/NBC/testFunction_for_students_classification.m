@@ -60,4 +60,4 @@ fprintf('Classification Accuracy: %.2f%%\n', classificationAccuracy);
 
 end
 
-%testFunction_for_students_classification2('Five Guys test SVM mix');
+%testFunction_for_students_classification2('overfitter');
